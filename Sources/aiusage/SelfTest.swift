@@ -19,6 +19,8 @@ enum SelfTest {
         try testMenuTitleFallsBackToDollarsWhenWindowMissing()
         try testClaudeUsageParserReadsSessionAndWeeklyPercentLeft()
         try testClaudeUsageParserReadsLocalTotalCost()
+        try testDurationLabelsAndCodexWindowClassification()
+        try testPartialDualLimitFormatting()
         try testCostScannerOnlyCountsCurrentBillingPeriodExplicitCosts()
         try testResetCreditSummaryAndExpirationHelp()
         try testMenuBarStatusImagesRenderVisiblePixels()
@@ -168,6 +170,44 @@ enum SelfTest {
         try expect(parsed.plan == "Claude local usage", "expected local usage plan marker")
     }
 
+    private static func testDurationLabelsAndCodexWindowClassification() throws {
+        try expect(RateWindow.durationLabel(minutes: 300) == "5h", "expected 300 minutes to display as 5h")
+        try expect(RateWindow.durationLabel(minutes: 10_080) == "7d", "expected 10080 minutes to display as 7d")
+        try expect(RateWindow.durationLabel(minutes: 90) == "1h 30m", "expected mixed duration label")
+
+        let weekly = RateWindow(
+            usedPercent: 3,
+            windowMinutes: 10_080,
+            resetsAt: nil,
+            resetDescription: nil)
+        let weeklyOnly = CodexUsageFetcher.classifyWindows([weekly])
+        try expect(weeklyOnly.short == nil, "expected no short window for a weekly-only response")
+        try expect(weeklyOnly.long == weekly, "expected the weekly-only response in the long slot")
+
+        let session = RateWindow(
+            usedPercent: 20,
+            windowMinutes: 360,
+            resetsAt: nil,
+            resetDescription: nil)
+        let both = CodexUsageFetcher.classifyWindows([weekly, session])
+        try expect(both.short == session, "expected shorter duration first regardless of backend order")
+        try expect(both.long == weekly, "expected longer duration second regardless of backend order")
+    }
+
+    private static func testPartialDualLimitFormatting() throws {
+        let weekly = RateWindow(
+            usedPercent: 3,
+            windowMinutes: 10_080,
+            resetsAt: nil,
+            resetDescription: nil)
+        let text = DisplayFormatter.menuPercentText(
+            window: nil,
+            innerWindow: weekly,
+            metric: .bothPercent,
+            showUsed: false)
+        try expect(text == "7d: 97%", "expected weekly-only dual text, got \(text ?? "nil")")
+    }
+
     private static func testCostScannerOnlyCountsCurrentBillingPeriodExplicitCosts() throws {
         let temp = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -271,6 +311,17 @@ enum SelfTest {
             amountText: nil)
         try expect(percentImage.size.width >= 20, "expected percentage status image width")
         try expect(Self.visiblePixelCount(in: percentImage) > 8, "expected visible pixels for percentage status image")
+
+        let weeklyOnlyImage = MenuBarStatusImageRenderer.image(
+            selection: .codex,
+            metric: .bothPercent,
+            displayMode: .ringAndPercentage,
+            window: nil,
+            innerWindow: RateWindow(usedPercent: 3, windowMinutes: 10_080, resetsAt: nil, resetDescription: nil),
+            percentText: "7d: 97%",
+            amountText: nil)
+        try expect(weeklyOnlyImage.size.width > 40, "expected weekly-only ring and percentage width")
+        try expect(Self.visiblePixelCount(in: weeklyOnlyImage) > 8, "expected visible weekly-only status image")
     }
 
     private static func snapshot(provider: Provider, dollars: Double, since: Date) -> UsageSnapshot {

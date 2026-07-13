@@ -31,12 +31,6 @@ struct AIUsageApp: App {
             MenuBarLabelView(store: store)
         }
         .menuBarExtraStyle(.window)
-
-        Settings {
-            SettingsPane(store: store)
-                .frame(width: 420)
-                .padding()
-        }
     }
 }
 
@@ -46,7 +40,7 @@ final class UsageStore: ObservableObject {
         .codex: ProviderState(),
         .claude: ProviderState(),
     ]
-    @AppStorage("refreshSeconds") var refreshSeconds = 300
+    @AppStorage("refreshSeconds") var refreshSeconds = 60
     @AppStorage("showUsedPercent") var showUsedPercent = false
     @AppStorage("trackCodex") var trackCodex = true
     @AppStorage("trackClaude") var trackClaude = true
@@ -98,7 +92,9 @@ final class UsageStore: ObservableObject {
     }
 
     var menuBarAmountText: String? {
-        guard menuMetric == .billingDollars || menuBarWindow == nil else { return nil }
+        guard menuMetric == .billingDollars || (menuBarWindow == nil && menuBarInnerWindow == nil) else {
+            return nil
+        }
         guard let amount = DisplayFormatter.fallbackAmountText(
             states: states,
             providerSelection: menuProvider)
@@ -112,6 +108,27 @@ final class UsageStore: ObservableObject {
             innerWindow: menuBarInnerWindow,
             metric: menuMetric,
             showUsed: false)
+    }
+
+    func menuMetricLabel(_ metric: MenuMetric) -> String {
+        switch metric {
+        case .fiveHourPercent:
+            let window = DisplayFormatter.selectedWindow(
+                states: states,
+                providerSelection: menuProvider,
+                metric: metric)
+            return "\(window?.durationLabel ?? "Short") %"
+        case .sevenDayPercent:
+            let window = DisplayFormatter.selectedWindow(
+                states: states,
+                providerSelection: menuProvider,
+                metric: metric)
+            return "\(window?.durationLabel ?? "Long") %"
+        case .bothPercent:
+            return "All limits"
+        case .billingDollars:
+            return metric.label
+        }
     }
 
     var trackedProviders: [Provider] {
@@ -138,7 +155,12 @@ final class UsageStore: ObservableObject {
         let seconds = refreshSeconds
         timerTask = Task.detached(priority: .utility) { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(seconds))
+                do {
+                    try await Task.sleep(for: .seconds(seconds))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
                 await self?.refreshAll()
             }
         }
@@ -223,6 +245,8 @@ final class UsageStore: ObservableObject {
 struct MenuContentView: View {
     @ObservedObject var store: UsageStore
 
+    private static let refreshIntervals = [5, 15, 30, 60, 300, 900, 1_800, 3_600]
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -303,7 +327,7 @@ struct MenuContentView: View {
                     set: { store.menuMetric = $0 }))
                 {
                     ForEach(MenuMetric.allCases) { metric in
-                        Text(metric.label).tag(metric)
+                        Text(store.menuMetricLabel(metric)).tag(metric)
                     }
                 }
                 .labelsHidden()
@@ -323,9 +347,53 @@ struct MenuContentView: View {
                 .labelsHidden()
                 .pickerStyle(.segmented)
             }
+            GridRow {
+                Text("Refresh")
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    Slider(
+                        value: Binding(
+                            get: { Double(refreshIntervalIndex) },
+                            set: { setRefreshInterval(index: Int($0.rounded())) }),
+                        in: 0...Double(Self.refreshIntervals.count - 1),
+                        step: 1,
+                        onEditingChanged: { isEditing in
+                            if !isEditing {
+                                store.restartTimer()
+                            }
+                        })
+                    Text(refreshIntervalLabel)
+                        .monospacedDigit()
+                        .frame(width: 44, alignment: .trailing)
+                }
+            }
         }
         .font(.callout)
         .padding(12)
+    }
+
+    private var refreshIntervalIndex: Int {
+        Self.refreshIntervals.enumerated().min {
+            abs($0.element - store.refreshSeconds) < abs($1.element - store.refreshSeconds)
+        }?.offset ?? 3
+    }
+
+    private var refreshIntervalLabel: String {
+        switch store.refreshSeconds {
+        case ..<60:
+            "\(store.refreshSeconds)s"
+        case ..<3_600:
+            "\(store.refreshSeconds / 60)m"
+        default:
+            "1h"
+        }
+    }
+
+    private func setRefreshInterval(index: Int) {
+        let boundedIndex = min(max(index, 0), Self.refreshIntervals.count - 1)
+        let seconds = Self.refreshIntervals[boundedIndex]
+        guard seconds != store.refreshSeconds else { return }
+        store.refreshSeconds = seconds
     }
 }
 
@@ -346,14 +414,15 @@ struct MenuBarLabelView: View {
     }
 
     private var helpText: String {
-        if let outer = store.menuBarWindow,
-           let inner = store.menuBarInnerWindow,
-           store.menuMetric == .bothPercent
-        {
-            return "5h \(DisplayFormatter.percent(outer.remainingPercent)) left, 7d \(DisplayFormatter.percent(inner.remainingPercent)) left"
+        if store.menuMetric == .bothPercent {
+            let summaries = [store.menuBarWindow, store.menuBarInnerWindow].compactMap { window -> String? in
+                guard let window else { return nil }
+                return "\(window.durationLabel) \(DisplayFormatter.percent(window.remainingPercent)) left"
+            }
+            if !summaries.isEmpty { return summaries.joined(separator: ", ") }
         }
         if let window = store.menuBarWindow, store.menuMetric != .billingDollars {
-            return "\(DisplayFormatter.percent(window.remainingPercent)) left"
+            return "\(window.durationLabel) \(DisplayFormatter.percent(window.remainingPercent)) left"
         }
         return store.menuBarAmountText ?? "No usage data"
     }
@@ -376,7 +445,8 @@ enum MenuBarStatusImageRenderer {
         amountText: String?) -> NSImage
     {
         _ = selection
-        let showsProgress = metric != .billingDollars && window != nil
+        let availableWindow = window ?? innerWindow
+        let showsProgress = metric != .billingDollars && availableWindow != nil
         let showsRing = showsProgress && displayMode != .percentage
         let showsPercent = showsProgress && displayMode != .ring
         let amount = showsProgress ? nil : amountText
@@ -392,20 +462,20 @@ enum MenuBarStatusImageRenderer {
             NSColor.clear.setFill()
             rect.fill()
 
-            if let window, showsRing {
+            if let availableWindow, showsRing {
                 let progressRect = NSRect(
                     x: 0,
                     y: (rect.height - Self.ringDiameter) / 2,
                     width: Self.ringDiameter,
                     height: Self.ringDiameter)
-                if metric == .bothPercent, let innerWindow {
+                if metric == .bothPercent, let window, let innerWindow {
                     self.drawNestedProgress(
                         outerRemainingPercent: window.remainingPercent,
                         innerRemainingPercent: innerWindow.remainingPercent,
                         in: progressRect)
                 } else {
                     self.drawProgress(
-                        remainingPercent: window.remainingPercent,
+                        remainingPercent: availableWindow.remainingPercent,
                         in: progressRect)
                 }
             }
@@ -573,8 +643,15 @@ struct ProviderCard: View {
                 .help("Refresh \(provider.displayName)")
             }
 
-            UsageBar(label: "5h", window: state.snapshot?.fiveHour)
-            UsageBar(label: "7d", window: state.snapshot?.sevenDay)
+            if let shortWindow = state.snapshot?.fiveHour {
+                UsageBar(label: shortWindow.durationLabel, window: shortWindow)
+            }
+            if let longWindow = state.snapshot?.sevenDay {
+                UsageBar(label: longWindow.durationLabel, window: longWindow)
+            }
+            if state.snapshot?.rateWindows.isEmpty != false {
+                UsageBar(label: "Limits", window: nil)
+            }
 
             amountRow
 
@@ -788,50 +865,5 @@ struct UsageBar: View {
             .replacingOccurrences(of: " PM", with: "PM")
             .replacingOccurrences(of: "AM", with: " AM")
             .replacingOccurrences(of: "PM", with: " PM")
-    }
-}
-
-struct SettingsPane: View {
-    @ObservedObject var store: UsageStore
-
-    var body: some View {
-        Form {
-            Picker("Refresh", selection: $store.refreshSeconds) {
-                Text("Manual").tag(0)
-                Text("1 minute").tag(60)
-                Text("5 minutes").tag(300)
-                Text("15 minutes").tag(900)
-            }
-            .onChange(of: store.refreshSeconds) { _, _ in
-                store.restartTimer()
-            }
-
-            Picker("Menu provider", selection: Binding(
-                get: { store.menuProvider },
-                set: { store.menuProvider = $0 }))
-            {
-                ForEach(MenuProviderSelection.allCases) { option in
-                    Text(option.label).tag(option)
-                }
-            }
-
-            Picker("Menu metric", selection: Binding(
-                get: { store.menuMetric },
-                set: { store.menuMetric = $0 }))
-            {
-                ForEach(MenuMetric.allCases) { metric in
-                    Text(metric.label).tag(metric)
-                }
-            }
-
-            Picker("Display mode", selection: Binding(
-                get: { store.menuDisplayMode },
-                set: { store.menuDisplayMode = $0 }))
-            {
-                ForEach(MenuDisplayMode.allCases) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-        }
     }
 }

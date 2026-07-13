@@ -52,9 +52,9 @@ enum MenuMetric: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .fiveHourPercent: "5h %"
-        case .sevenDayPercent: "7d %"
-        case .bothPercent: "5h + 7d"
+        case .fiveHourPercent: "Short %"
+        case .sevenDayPercent: "Long %"
+        case .bothPercent: "All limits"
         case .billingDollars: "Billing $"
         }
     }
@@ -84,6 +84,22 @@ struct RateWindow: Codable, Equatable, Sendable {
 
     var remainingPercent: Double {
         max(0, 100 - self.usedPercent)
+    }
+
+    var durationLabel: String {
+        guard let windowMinutes, windowMinutes > 0 else { return "Limit" }
+        return Self.durationLabel(minutes: windowMinutes)
+    }
+
+    static func durationLabel(minutes: Int) -> String {
+        let days = minutes / (24 * 60)
+        let hours = (minutes % (24 * 60)) / 60
+        let remainingMinutes = minutes % 60
+        var parts: [String] = []
+        if days > 0 { parts.append("\(days)d") }
+        if hours > 0 { parts.append("\(hours)h") }
+        if remainingMinutes > 0 || parts.isEmpty { parts.append("\(remainingMinutes)m") }
+        return parts.joined(separator: " ")
     }
 }
 
@@ -126,6 +142,10 @@ struct UsageSnapshot: Codable, Equatable, Sendable {
     var plan: String?
     var source: String
     var updatedAt: Date
+
+    var rateWindows: [RateWindow] {
+        [fiveHour, sevenDay].compactMap { $0 }
+    }
 }
 
 struct ProviderState: Equatable {
@@ -232,18 +252,21 @@ enum DisplayFormatter {
 
         case .bothPercent:
             let prefix = providerSelection.provider?.shortName ?? "AI"
-            let fiveHour = self.selectedWindow(
+            let shortWindow = self.selectedWindow(
                 states: states,
                 providerSelection: providerSelection,
                 metric: .fiveHourPercent)
-            let sevenDay = self.selectedWindow(
+            let longWindow = self.selectedWindow(
                 states: states,
                 providerSelection: providerSelection,
                 metric: .sevenDayPercent)
-            if let fiveHour, let sevenDay {
-                let fiveHourPercent = showUsed ? fiveHour.usedPercent : fiveHour.remainingPercent
-                let sevenDayPercent = showUsed ? sevenDay.usedPercent : sevenDay.remainingPercent
-                return "\(prefix) 5h \(Self.percent(fiveHourPercent)) · 7d \(Self.percent(sevenDayPercent))"
+            let summaries = [shortWindow, longWindow].compactMap { window -> String? in
+                guard let window else { return nil }
+                let value = showUsed ? window.usedPercent : window.remainingPercent
+                return "\(window.durationLabel) \(Self.percent(value))"
+            }
+            if !summaries.isEmpty {
+                return "\(prefix) \(summaries.joined(separator: " · "))"
             }
             if let amount = self.fallbackAmountText(
                 states: states,
@@ -336,10 +359,12 @@ enum DisplayFormatter {
     {
         guard metric != .billingDollars else { return nil }
         if metric == .bothPercent {
-            guard let window, let innerWindow else { return nil }
-            let outerPercent = showUsed ? window.usedPercent : window.remainingPercent
-            let innerPercent = showUsed ? innerWindow.usedPercent : innerWindow.remainingPercent
-            return "5h: \(Self.percent(outerPercent))\n7d: \(Self.percent(innerPercent))"
+            let lines = [window, innerWindow].compactMap { rateWindow -> String? in
+                guard let rateWindow else { return nil }
+                let value = showUsed ? rateWindow.usedPercent : rateWindow.remainingPercent
+                return "\(rateWindow.durationLabel): \(Self.percent(value))"
+            }
+            return lines.isEmpty ? nil : lines.joined(separator: "\n")
         }
         guard let window else { return nil }
         let percent = showUsed ? window.usedPercent : window.remainingPercent

@@ -117,11 +117,13 @@ struct CodexUsageFetcher: UsageFetching {
         let account = try? await rpc.fetchAccount()
         let resetCredits = (try? await CodexResetCreditFetcher(environment: environment).fetch())
             ?? rateLimitsResponse.rateLimitResetCredits?.snapshot
+        let classifiedWindows = Self.classifyWindows(
+            [limits.primary, limits.secondary].compactMap(Self.makeWindow))
         let now = Date()
         return UsageSnapshot(
             provider: .codex,
-            fiveHour: Self.makeWindow(limits.primary),
-            sevenDay: Self.makeWindow(limits.secondary),
+            fiveHour: classifiedWindows.short,
+            sevenDay: classifiedWindows.long,
             credits: limits.credits?.snapshot,
             resetCredits: resetCredits,
             billingCost: nil,
@@ -139,6 +141,28 @@ struct CodexUsageFetcher: UsageFetching {
             windowMinutes: rpc.windowDurationMins,
             resetsAt: rpc.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) },
             resetDescription: nil)
+    }
+
+    static func classifyWindows(_ windows: [RateWindow]) -> (short: RateWindow?, long: RateWindow?) {
+        let sorted = windows.sorted { lhs, rhs in
+            switch (lhs.windowMinutes, rhs.windowMinutes) {
+            case let (lhsMinutes?, rhsMinutes?): lhsMinutes < rhsMinutes
+            case (_?, nil): true
+            case (nil, _?): false
+            case (nil, nil): false
+            }
+        }
+        guard let first = sorted.first else { return (nil, nil) }
+        if sorted.count > 1 {
+            return (first, sorted.last)
+        }
+
+        // A lone window is placed by its scale because the backend may collapse a
+        // weekly window into `primary` when no shorter window applies.
+        if let minutes = first.windowMinutes, minutes >= 24 * 60 {
+            return (nil, first)
+        }
+        return (first, nil)
     }
 }
 
