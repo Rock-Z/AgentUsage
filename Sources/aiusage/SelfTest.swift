@@ -20,6 +20,7 @@ enum SelfTest {
         try testClaudeUsageParserReadsSessionAndWeeklyPercentLeft()
         try testClaudeUsageParserReadsLocalTotalCost()
         try testDurationLabelsAndCodexWindowClassification()
+        try testCodexAccountUsageParsingAndFormatting()
         try testPartialDualLimitFormatting()
         try testCostScannerOnlyCountsCurrentBillingPeriodExplicitCosts()
         try testResetCreditSummaryAndExpirationHelp()
@@ -192,6 +193,41 @@ enum SelfTest {
         let both = CodexUsageFetcher.classifyWindows([weekly, session])
         try expect(both.short == session, "expected shorter duration first regardless of backend order")
         try expect(both.long == weekly, "expected longer duration second regardless of backend order")
+    }
+
+    private static func testCodexAccountUsageParsingAndFormatting() throws {
+        let body = """
+        {
+          "summary": {
+            "lifetimeTokens": 24670581944,
+            "peakDailyTokens": 1954897499,
+            "longestRunningTurnSec": 47828,
+            "currentStreakDays": 15,
+            "longestStreakDays": 38
+          },
+          "dailyUsageBuckets": [
+            {"startDate": "2026-07-19", "tokens": 726133164},
+            {"startDate": "2026-07-20", "tokens": 198515919}
+          ]
+        }
+        """
+        let decoded = try JSONDecoder().decode(
+            CodexAccountUsageResponse.self,
+            from: Data(body.utf8))
+        let activity = decoded.snapshot
+
+        try expect(activity.lifetimeTokens == 24_670_581_944, "expected lifetime token total")
+        try expect(activity.dailyUsage.count == 2, "expected two daily usage buckets")
+        try expect(activity.dailyUsage.last?.date != nil, "expected activity date parsing")
+        try expect(DisplayFormatter.compactTokens(activity.lifetimeTokens) == "24.7B", "expected 24.7B")
+        try expect(DisplayFormatter.compactTokens(activity.peakDailyTokens) == "1.95B", "expected 1.95B")
+        try expect(DisplayFormatter.compactTokens(6_559_374_729) == "6.56B", "expected three significant figures")
+        try expect(DisplayFormatter.compactTokens(637_697_578) == "638M", "expected rounded megatokens")
+        try expect(
+            DisplayFormatter.duration(seconds: activity.longestRunningTurnSec) == "13h 17m",
+            "expected 13h 17m")
+        try expect(DisplayFormatter.roundedAxisMaximum(6_559_374_729) == 10_000_000_000, "expected 10B axis")
+        try expect(DisplayFormatter.roundedAxisMaximum(24_670_581_944) == 25_000_000_000, "expected 25B axis")
     }
 
     private static func testPartialDualLimitFormatting() throws {

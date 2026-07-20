@@ -32,7 +32,10 @@ enum ProbeCommand {
             .joined(separator: ", ")
         let amount = DisplayFormatter.amountText(snapshot) ?? DisplayFormatter.dollars(0)
         let amountLabel = snapshot.credits != nil ? "credits" : snapshot.billingCost != nil ? "billing" : "local usage"
+        let activity = snapshot.codexActivity.map {
+            ", activity \(DisplayFormatter.compactTokens($0.lifetimeTokens)) lifetime"
+        } ?? ""
         let account = snapshot.accountEmail ?? snapshot.plan ?? "unknown account"
-        return "\(snapshot.provider.displayName): limits \(limits.isEmpty ? "--" : limits), \(amountLabel) \(amount), \(account), source \(snapshot.source)"
+        return "\(snapshot.provider.displayName): limits \(limits.isEmpty ? "--" : limits), \(amountLabel) \(amount)\(activity), \(account), source \(snapshot.source)"
     }
 }

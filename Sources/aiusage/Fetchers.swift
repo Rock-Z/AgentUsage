@@ -115,6 +115,7 @@ struct CodexUsageFetcher: UsageFetching {
         let rateLimitsResponse = try await rpc.fetchRateLimits()
         let limits = rateLimitsResponse.rateLimits
         let account = try? await rpc.fetchAccount()
+        let activity = try? await CodexActivityCache.shared.fetch(using: rpc)
         let resetCredits = (try? await CodexResetCreditFetcher(environment: environment).fetch())
             ?? rateLimitsResponse.rateLimitResetCredits?.snapshot
         let classifiedWindows = Self.classifyWindows(
@@ -130,6 +131,7 @@ struct CodexUsageFetcher: UsageFetching {
             localUsageCost: nil,
             accountEmail: account?.email,
             plan: account?.plan ?? limits.planType,
+            codexActivity: activity,
             source: "codex app-server",
             updatedAt: now)
     }
@@ -169,6 +171,36 @@ struct CodexUsageFetcher: UsageFetching {
 private struct CodexRateLimitsResponse: Decodable {
     let rateLimits: CodexRateLimitSnapshot
     let rateLimitResetCredits: CodexResetCreditsSummary?
+}
+
+struct CodexAccountUsageResponse: Decodable {
+    struct Summary: Decodable {
+        let lifetimeTokens: Int64?
+        let peakDailyTokens: Int64?
+        let longestRunningTurnSec: Int64?
+        let currentStreakDays: Int64?
+        let longestStreakDays: Int64?
+    }
+
+    struct DailyBucket: Decodable {
+        let startDate: String
+        let tokens: Int64
+    }
+
+    let summary: Summary
+    let dailyUsageBuckets: [DailyBucket]?
+
+    var snapshot: CodexActivitySnapshot {
+        CodexActivitySnapshot(
+            lifetimeTokens: summary.lifetimeTokens,
+            peakDailyTokens: summary.peakDailyTokens,
+            longestRunningTurnSec: summary.longestRunningTurnSec,
+            currentStreakDays: summary.currentStreakDays,
+            longestStreakDays: summary.longestStreakDays,
+            dailyUsage: (dailyUsageBuckets ?? []).map {
+                TokenUsageDay(startDate: $0.startDate, tokens: $0.tokens)
+            })
+    }
 }
 
 private struct CodexRateLimitSnapshot: Decodable {
@@ -351,6 +383,24 @@ private struct CodexAccountResponse: Decodable {
     }
 }
 
+private actor CodexActivityCache {
+    static let shared = CodexActivityCache()
+
+    private var cached: CodexActivitySnapshot?
+    private var fetchedAt: Date?
+    private let lifetime: TimeInterval = 60
+
+    func fetch(using rpc: CodexRPCClient, now: Date = Date()) async throws -> CodexActivitySnapshot {
+        if let cached, let fetchedAt, now.timeIntervalSince(fetchedAt) < lifetime {
+            return cached
+        }
+        let snapshot = try await rpc.fetchAccountUsage().snapshot
+        cached = snapshot
+        fetchedAt = now
+        return snapshot
+    }
+}
+
 private final class CodexRPCClient: @unchecked Sendable {
     private let process = Process()
     private let stdinPipe = Pipe()
@@ -429,7 +479,7 @@ private final class CodexRPCClient: @unchecked Sendable {
     func initialize() async throws {
         _ = try await request(
             method: "initialize",
-            params: ["clientInfo": ["name": "codex-claude-bar", "version": "0.1"]],
+            params: ["clientInfo": ["name": "codex-claude-bar", "version": "0.2"]],
             timeout: 8)
         try sendNotification(method: "initialized")
     }
@@ -440,6 +490,10 @@ private final class CodexRPCClient: @unchecked Sendable {
 
     func fetchAccount() async throws -> CodexAccountResponse {
         try await decodeResult(from: request(method: "account/read", timeout: 3))
+    }
+
+    func fetchAccountUsage() async throws -> CodexAccountUsageResponse {
+        try await decodeResult(from: request(method: "account/usage/read", timeout: 8))
     }
 
     func shutdown() {

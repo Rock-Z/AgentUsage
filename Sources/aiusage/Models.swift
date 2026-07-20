@@ -130,6 +130,35 @@ struct ResetCreditSnapshot: Codable, Equatable, Sendable {
     var credits: [ResetCredit]
 }
 
+struct TokenUsageDay: Codable, Equatable, Sendable, Identifiable {
+    var startDate: String
+    var tokens: Int64
+
+    var id: String { startDate }
+
+    var date: Date? {
+        let components = startDate.split(separator: "-").compactMap { Int($0) }
+        guard components.count == 3 else { return nil }
+        var dateComponents = DateComponents()
+        dateComponents.calendar = Calendar(identifier: .gregorian)
+        dateComponents.timeZone = .current
+        dateComponents.year = components[0]
+        dateComponents.month = components[1]
+        dateComponents.day = components[2]
+        dateComponents.hour = 12
+        return dateComponents.date
+    }
+}
+
+struct CodexActivitySnapshot: Codable, Equatable, Sendable {
+    var lifetimeTokens: Int64?
+    var peakDailyTokens: Int64?
+    var longestRunningTurnSec: Int64?
+    var currentStreakDays: Int64?
+    var longestStreakDays: Int64?
+    var dailyUsage: [TokenUsageDay]
+}
+
 struct UsageSnapshot: Codable, Equatable, Sendable {
     var provider: Provider
     var fiveHour: RateWindow?
@@ -140,6 +169,7 @@ struct UsageSnapshot: Codable, Equatable, Sendable {
     var localUsageCost: CostSnapshot?
     var accountEmail: String?
     var plan: String?
+    var codexActivity: CodexActivitySnapshot? = nil
     var source: String
     var updatedAt: Date
 
@@ -164,6 +194,53 @@ enum DisplayFormatter {
             return String(format: "$%.2f", value)
         }
         return String(format: "$%.0f", value)
+    }
+
+    static func compactTokens(_ value: Int64?) -> String {
+        guard let value else { return "--" }
+        let absolute = abs(Double(value))
+        let divisor: Double
+        let suffix: String
+        switch absolute {
+        case 1_000_000_000...:
+            divisor = 1_000_000_000
+            suffix = "B"
+        case 1_000_000...:
+            divisor = 1_000_000
+            suffix = "M"
+        case 1_000...:
+            divisor = 1_000
+            suffix = "K"
+        default:
+            return value.formatted()
+        }
+
+        let scaled = Double(value) / divisor
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.numberStyle = .decimal
+        formatter.usesSignificantDigits = true
+        formatter.maximumSignificantDigits = 3
+        formatter.minimumSignificantDigits = 1
+        let number = formatter.string(from: NSNumber(value: scaled)) ?? String(format: "%.1f", scaled)
+        return "\(number)\(suffix)"
+    }
+
+    static func duration(seconds: Int64?) -> String {
+        guard let seconds else { return "--" }
+        let hours = seconds / 3_600
+        let minutes = (seconds % 3_600) / 60
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        if minutes > 0 { return "\(minutes)m" }
+        return "\(seconds)s"
+    }
+
+    static func roundedAxisMaximum(_ value: Int64) -> Int64 {
+        guard value > 0 else { return 1 }
+        let magnitude = pow(10, floor(log10(Double(value))))
+        let normalized = Double(value) / magnitude
+        let step = [1.0, 2.0, 2.5, 5.0, 10.0].first { normalized <= $0 } ?? 10
+        return Int64((step * magnitude).rounded(.up))
     }
 
     static func credits(_ snapshot: CreditSnapshot) -> String {
