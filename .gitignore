@@ -1,2 +1,11 @@
 .build/
 .DS_Store
+DerivedData/
+*.xcuserstate
+.env
+.env.*
+!.env.example
+*.cer
+*.p12
+*.provisionprofile
+*.mobileprovision

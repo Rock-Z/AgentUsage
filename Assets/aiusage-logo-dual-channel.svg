@@ -71,6 +71,9 @@
     </filter>
   </defs>
 
+  <!-- Match the optical footprint of standard macOS icons: about 86% of the
+       square canvas, with a slight vertical correction for the molded body. -->
+  <g transform="translate(512 512) scale(0.895 0.868) translate(-512 -512)">
   <!-- Molded platinum body -->
   <rect x="62" y="48" width="900" height="928" rx="184" fill="url(#shell)" filter="url(#outerShadow)"/>
   <rect x="69" y="55" width="886" height="914" rx="177" fill="none" stroke="url(#shellEdge)" stroke-width="14"/>
@@ -149,4 +152,5 @@
   <circle cx="824" cy="828" r="31" fill="#2b2113" stroke="#fff9ed" stroke-opacity="0.55" stroke-width="4"/>
   <circle cx="824" cy="828" r="22" fill="url(#amberLamp)" stroke="#6d3600" stroke-width="3"/>
   <circle cx="817" cy="821" r="6" fill="#fff" opacity="0.42"/>
+  </g>
 </svg>

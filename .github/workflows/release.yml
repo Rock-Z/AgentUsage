@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tag version
+        shell: bash
+        run: |
+          set -euo pipefail
+          plist_version="$(sed -n '/CFBundleShortVersionString/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' Scripts/build-app.sh)"
+          test "${GITHUB_REF_NAME#v}" = "$plist_version"
+
+      - name: Import Developer ID certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          keychain="$RUNNER_TEMP/aiusage-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          printf '%s' "$CERTIFICATE_BASE64" | base64 -D > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security list-keychain -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain"
+
+      - name: Build universal app
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift build -c release --triple arm64-apple-macosx14.0 --scratch-path .build/arm64
+          swift build -c release --triple x86_64-apple-macosx14.0 --scratch-path .build/x86_64
+          mkdir -p .build/universal
+          lipo -create \
+            .build/arm64/arm64-apple-macosx/release/aiusage \
+            .build/x86_64/x86_64-apple-macosx/release/aiusage \
+            -output .build/universal/aiusage
+          AIUSAGE_EXECUTABLE="$PWD/.build/universal/aiusage" ./Scripts/build-app.sh
+
+      - name: Sign and notarize
+        env:
+          SIGNING_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=".build/release/aiusage.app"
+          submission="$RUNNER_TEMP/aiusage-notarization.zip"
+          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app/Contents/MacOS/aiusage"
+          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          ditto -c -k --keepParent "$app" "$submission"
+          xcrun notarytool submit "$submission" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --wait
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=2 "$app"
+
+      - name: Package release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ditto -c -k --keepParent .build/release/aiusage.app dist/aiusage-macos-universal.zip
+          (
+            cd dist
+            shasum -a 256 aiusage-macos-universal.zip > aiusage-macos-universal.zip.sha256
+          )
+          cp Scripts/install.sh dist/install.sh
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/aiusage-macos-universal.zip \
+            dist/aiusage-macos-universal.zip.sha256 \
+            dist/install.sh \
+            --verify-tag \
+            --generate-notes \
+            --title "aiusage $GITHUB_REF_NAME"
+
+      - name: Remove signing credentials
+        if: always()
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/aiusage-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/developer-id.p12"
