@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">aiusage dual-channel meter</title>
+  <desc id="desc">A platinum retro computer panel with blue and teal segmented usage meters.</desc>
+
+  <defs>
+    <linearGradient id="shell" x1="0" y1="0" x2="0.88" y2="1">
+      <stop offset="0" stop-color="#faf7ee"/>
+      <stop offset="0.48" stop-color="#e8e1d3"/>
+      <stop offset="1" stop-color="#c8beac"/>
+    </linearGradient>
+    <linearGradient id="shellEdge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fffdf7" stop-opacity="0.94"/>
+      <stop offset="0.55" stop-color="#d6cdbc" stop-opacity="0.15"/>
+      <stop offset="1" stop-color="#8d8476" stop-opacity="0.72"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#303637"/>
+      <stop offset="0.52" stop-color="#222728"/>
+      <stop offset="1" stop-color="#161a1b"/>
+    </linearGradient>
+    <linearGradient id="trench" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#080b0c"/>
+      <stop offset="0.48" stop-color="#111617"/>
+      <stop offset="1" stop-color="#252a2a"/>
+    </linearGradient>
+    <linearGradient id="blueSegment" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#44b4ff"/>
+      <stop offset="0.18" stop-color="#138df0"/>
+      <stop offset="1" stop-color="#0760bd"/>
+    </linearGradient>
+    <linearGradient id="tealSegment" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3be4d2"/>
+      <stop offset="0.18" stop-color="#11bcae"/>
+      <stop offset="1" stop-color="#087f78"/>
+    </linearGradient>
+    <linearGradient id="idleSegment" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3c4241"/>
+      <stop offset="1" stop-color="#242928"/>
+    </linearGradient>
+    <radialGradient id="blueLamp" cx="36%" cy="30%" r="72%">
+      <stop offset="0" stop-color="#bceaff"/>
+      <stop offset="0.18" stop-color="#36baff"/>
+      <stop offset="0.64" stop-color="#087cd8"/>
+      <stop offset="1" stop-color="#034483"/>
+    </radialGradient>
+    <radialGradient id="tealLamp" cx="36%" cy="30%" r="72%">
+      <stop offset="0" stop-color="#c2fff7"/>
+      <stop offset="0.18" stop-color="#40eadb"/>
+      <stop offset="0.64" stop-color="#09a69a"/>
+      <stop offset="1" stop-color="#045c58"/>
+    </radialGradient>
+    <radialGradient id="amberLamp" cx="36%" cy="30%" r="72%">
+      <stop offset="0" stop-color="#fff1aa"/>
+      <stop offset="0.22" stop-color="#ffc84e"/>
+      <stop offset="0.68" stop-color="#ed8c0b"/>
+      <stop offset="1" stop-color="#884500"/>
+    </radialGradient>
+
+    <filter id="outerShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#181512" flood-opacity="0.34"/>
+    </filter>
+    <filter id="innerShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="7" stdDeviation="8" flood-color="#000" flood-opacity="0.58"/>
+    </filter>
+    <filter id="segmentGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="0" stdDeviation="5" flood-color="#159aff" flood-opacity="0.34"/>
+    </filter>
+    <filter id="tealGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="0" stdDeviation="5" flood-color="#18cabb" flood-opacity="0.30"/>
+    </filter>
+  </defs>
+
+  <!-- Molded platinum body -->
+  <rect x="62" y="48" width="900" height="928" rx="184" fill="url(#shell)" filter="url(#outerShadow)"/>
+  <rect x="69" y="55" width="886" height="914" rx="177" fill="none" stroke="url(#shellEdge)" stroke-width="14"/>
+  <!-- Recessed dual-channel display -->
+  <rect x="126" y="210" width="772" height="502" rx="86" fill="#111516" opacity="0.52" filter="url(#innerShadow)"/>
+  <rect x="136" y="220" width="752" height="482" rx="76" fill="url(#panel)" stroke="#0b0e0f" stroke-width="4"/>
+  <path d="M152 242Q166 226 190 226H834Q862 226 875 246" fill="none" stroke="#5e6462" stroke-opacity="0.34" stroke-width="5" stroke-linecap="round"/>
+  <rect x="142" y="455" width="740" height="4" rx="2" fill="#080b0c"/>
+  <rect x="142" y="460" width="740" height="2" rx="1" fill="#555b59" opacity="0.35"/>
+
+  <!-- Upper meter trench -->
+  <rect x="164" y="274" width="618" height="126" rx="31" fill="#080b0c" opacity="0.72" filter="url(#innerShadow)"/>
+  <rect x="171" y="281" width="604" height="112" rx="25" fill="url(#trench)" stroke="#3b4140" stroke-width="3"/>
+
+  <!-- Upper meter: 7 / 10 -->
+  <g stroke-linejoin="round">
+    <g fill="url(#blueSegment)" stroke="#58bcff" stroke-opacity="0.62" stroke-width="2" filter="url(#segmentGlow)">
+      <rect x="188" y="299" width="48" height="76" rx="7"/>
+      <rect x="245" y="299" width="48" height="76" rx="7"/>
+      <rect x="302" y="299" width="48" height="76" rx="7"/>
+      <rect x="359" y="299" width="48" height="76" rx="7"/>
+      <rect x="416" y="299" width="48" height="76" rx="7"/>
+      <rect x="473" y="299" width="48" height="76" rx="7"/>
+      <rect x="530" y="299" width="48" height="76" rx="7"/>
+    </g>
+    <g fill="url(#idleSegment)" stroke="#4c5351" stroke-width="2">
+      <rect x="587" y="299" width="48" height="76" rx="7"/>
+      <rect x="644" y="299" width="48" height="76" rx="7"/>
+      <rect x="701" y="299" width="48" height="76" rx="7"/>
+    </g>
+  </g>
+
+  <!-- Lower meter trench -->
+  <rect x="164" y="492" width="618" height="126" rx="31" fill="#080b0c" opacity="0.72" filter="url(#innerShadow)"/>
+  <rect x="171" y="499" width="604" height="112" rx="25" fill="url(#trench)" stroke="#3b4140" stroke-width="3"/>
+
+  <!-- Lower meter: 6 / 10 -->
+  <g stroke-linejoin="round">
+    <g fill="url(#tealSegment)" stroke="#58eadb" stroke-opacity="0.58" stroke-width="2" filter="url(#tealGlow)">
+      <rect x="188" y="517" width="48" height="76" rx="7"/>
+      <rect x="245" y="517" width="48" height="76" rx="7"/>
+      <rect x="302" y="517" width="48" height="76" rx="7"/>
+      <rect x="359" y="517" width="48" height="76" rx="7"/>
+      <rect x="416" y="517" width="48" height="76" rx="7"/>
+      <rect x="473" y="517" width="48" height="76" rx="7"/>
+    </g>
+    <g fill="url(#idleSegment)" stroke="#4c5351" stroke-width="2">
+      <rect x="530" y="517" width="48" height="76" rx="7"/>
+      <rect x="587" y="517" width="48" height="76" rx="7"/>
+      <rect x="644" y="517" width="48" height="76" rx="7"/>
+      <rect x="701" y="517" width="48" height="76" rx="7"/>
+    </g>
+  </g>
+
+  <!-- Channel lamps -->
+  <g>
+    <circle cx="830" cy="337" r="45" fill="#0a0d0e" stroke="#4c5554" stroke-width="7"/>
+    <circle cx="830" cy="337" r="32" fill="url(#blueLamp)" stroke="#001d37" stroke-width="4" filter="url(#segmentGlow)"/>
+    <circle cx="819" cy="326" r="8" fill="#fff" opacity="0.34"/>
+
+    <circle cx="830" cy="555" r="45" fill="#0a0d0e" stroke="#4c5554" stroke-width="7"/>
+    <circle cx="830" cy="555" r="32" fill="url(#tealLamp)" stroke="#002d2a" stroke-width="4" filter="url(#tealGlow)"/>
+    <circle cx="819" cy="544" r="8" fill="#fff" opacity="0.32"/>
+  </g>
+
+  <!-- Vent and amber status lamp -->
+  <g fill="none" stroke-linecap="round">
+    <path d="M188 794H595" stroke="#877e70" stroke-width="16" opacity="0.45"/>
+    <path d="M188 789H595" stroke="#fffaf0" stroke-width="6" opacity="0.55"/>
+    <path d="M188 829H595" stroke="#877e70" stroke-width="16" opacity="0.45"/>
+    <path d="M188 824H595" stroke="#fffaf0" stroke-width="6" opacity="0.52"/>
+    <path d="M188 864H595" stroke="#877e70" stroke-width="16" opacity="0.45"/>
+    <path d="M188 859H595" stroke="#fffaf0" stroke-width="6" opacity="0.48"/>
+  </g>
+  <circle cx="824" cy="828" r="39" fill="#8e8373" opacity="0.52"/>
+  <circle cx="824" cy="828" r="31" fill="#2b2113" stroke="#fff9ed" stroke-opacity="0.55" stroke-width="4"/>
+  <circle cx="824" cy="828" r="22" fill="url(#amberLamp)" stroke="#6d3600" stroke-width="3"/>
+  <circle cx="817" cy="821" r="6" fill="#fff" opacity="0.42"/>
+</svg>
