@@ -7,6 +7,18 @@ struct AIUsageApp: App {
     @StateObject private var store = UsageStore()
 
     init() {
+        if let optionIndex = CommandLine.arguments.firstIndex(of: "--render-status-snapshot"),
+           CommandLine.arguments.indices.contains(optionIndex + 1)
+        {
+            do {
+                try MenuBarStatusSnapshotCommand.run(
+                    path: CommandLine.arguments[optionIndex + 1])
+                Foundation.exit(0)
+            } catch {
+                fputs("Status snapshot render failed: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if let optionIndex = CommandLine.arguments.firstIndex(of: "--render-snapshot"),
            CommandLine.arguments.indices.contains(optionIndex + 1)
         {
@@ -67,6 +79,8 @@ final class UsageStore: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var timerTask: Task<Void, Never>?
     private let fetchers: [Provider: any UsageFetching]
+    var renderingTrackedProviders: Set<Provider>?
+    var renderingRefreshSeconds: Int?
 
     var menuMetric: MenuMetric {
         get { MenuMetric(rawValue: menuMetricRaw) ?? .fiveHourPercent }
@@ -183,15 +197,17 @@ final class UsageStore: ObservableObject {
     }
 
     func refreshAll() {
-        refreshTask?.cancel()
+        guard refreshTask == nil else { return }
         refreshTask = Task { [weak self] in
             guard let self else { return }
             await self.refresh(providers: self.trackedProviders)
+            self.refreshTask = nil
         }
     }
 
     func refresh(provider: Provider) {
         guard isTracking(provider) else { return }
+        guard states[provider]?.isRefreshing != true else { return }
         Task { [weak self] in
             await self?.refresh(providers: [provider])
         }
@@ -202,7 +218,10 @@ final class UsageStore: ObservableObject {
     }
 
     func isTracking(_ provider: Provider) -> Bool {
-        switch provider {
+        if let renderingTrackedProviders {
+            return renderingTrackedProviders.contains(provider)
+        }
+        return switch provider {
         case .codex: trackCodex
         case .claude: trackClaude
         }
@@ -215,6 +234,8 @@ final class UsageStore: ObservableObject {
         case .claude:
             trackClaude = enabled
         }
+
+        menuProvider = menuProvider.constrained(to: trackedProviders)
 
         if enabled {
             refresh(provider: provider)
@@ -254,7 +275,12 @@ final class UsageStore: ObservableObject {
                     state.snapshot = snapshot
                     state.error = nil
                 case let .failure(error):
-                    state.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    if provider == .claude, state.snapshot != nil {
+                        // Retain the last successful Claude reading on transient failures.
+                        state.error = nil
+                    } else {
+                        state.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    }
                 }
                 states[provider] = state
             }
@@ -282,7 +308,11 @@ private enum RenderSnapshotCommand {
         var renderResult: Result<Void, Error>?
 
         Task { @MainActor in
-            await store.refreshForSnapshot()
+            if ProcessInfo.processInfo.environment["AIUSAGE_SNAPSHOT_DATA"] == "mock" {
+                configureMockData(store)
+            } else {
+                await store.refreshForSnapshot()
+            }
             do {
                 try render(store: store, path: path, period: period)
                 renderResult = .success(())
@@ -303,9 +333,19 @@ private enum RenderSnapshotCommand {
         path: String,
         period: CodexActivityPeriod?) throws
     {
+        let snapshotAppearance = ProcessInfo.processInfo.environment["AIUSAGE_SNAPSHOT_APPEARANCE"]
+        let colorScheme: ColorScheme = switch snapshotAppearance {
+        case "dark": .dark
+        case "light": .light
+        default: .light
+        }
+        let backdrop = ProcessInfo.processInfo.environment["AIUSAGE_SNAPSHOT_BACKDROP"] ?? "plain"
         let rootView = MenuContentView(store: store, initialActivityPeriod: period ?? .daily)
             .frame(width: 360)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background {
+                SnapshotBackdrop(kind: backdrop, colorScheme: colorScheme)
+            }
+            .environment(\.colorScheme, colorScheme)
         let hostingView = NSHostingView(rootView: rootView)
         hostingView.frame = NSRect(x: 0, y: 0, width: 360, height: 1_200)
         hostingView.layoutSubtreeIfNeeded()
@@ -325,43 +365,276 @@ private enum RenderSnapshotCommand {
         }
         try png.write(to: URL(fileURLWithPath: path), options: .atomic)
     }
+
+    private static func configureMockData(_ store: UsageStore) {
+        let now = Date()
+        let activity = mockActivity(now: now)
+        store.renderingTrackedProviders = Set(Provider.allCases)
+        if let rawRefresh = ProcessInfo.processInfo.environment["AIUSAGE_SNAPSHOT_REFRESH_SECONDS"],
+           let refreshSeconds = Int(rawRefresh)
+        {
+            store.renderingRefreshSeconds = refreshSeconds
+        }
+        store.states = [
+            .codex: ProviderState(snapshot: UsageSnapshot(
+                provider: .codex,
+                fiveHour: RateWindow(
+                    usedPercent: 24,
+                    windowMinutes: 300,
+                    resetsAt: now.addingTimeInterval(2.4 * 3_600),
+                    resetDescription: nil),
+                sevenDay: RateWindow(
+                    usedPercent: 47,
+                    windowMinutes: 10_080,
+                    resetsAt: now.addingTimeInterval(4.2 * 86_400),
+                    resetDescription: nil),
+                credits: nil,
+                resetCredits: ResetCreditSnapshot(availableCount: 4, credits: []),
+                billingCost: nil,
+                localUsageCost: nil,
+                accountEmail: nil,
+                plan: "pro",
+                codexActivity: activity,
+                source: "mock",
+                updatedAt: now)),
+            .claude: ProviderState(snapshot: UsageSnapshot(
+                provider: .claude,
+                fiveHour: RateWindow(
+                    usedPercent: 31,
+                    windowMinutes: 300,
+                    resetsAt: now.addingTimeInterval(1.3 * 3_600),
+                    resetDescription: nil),
+                sevenDay: RateWindow(
+                    usedPercent: 58,
+                    windowMinutes: 10_080,
+                    resetsAt: now.addingTimeInterval(2.7 * 86_400),
+                    resetDescription: nil),
+                credits: CreditSnapshot(
+                    balance: 68.25,
+                    hasCredits: true,
+                    unlimited: false,
+                    currencyCode: "USD"),
+                billingCost: nil,
+                localUsageCost: nil,
+                accountEmail: nil,
+                plan: "Claude Pro",
+                source: "mock",
+                updatedAt: now)),
+        ]
+    }
+
+    private static func mockActivity(now: Date) -> CodexActivitySnapshot {
+        let calendar = Calendar.current
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        let days = (0..<182).compactMap { offset -> TokenUsageDay? in
+            guard let date = calendar.date(byAdding: .day, value: offset - 181, to: now) else {
+                return nil
+            }
+            let wave = Int64((offset * 37) % 11 + 1)
+            let burst = offset.isMultiple(of: 17) ? Int64(420_000_000) : 0
+            return TokenUsageDay(
+                startDate: formatter.string(from: date),
+                tokens: wave * 34_000_000 + burst)
+        }
+        return CodexActivitySnapshot(
+            lifetimeTokens: days.reduce(0) { $0 + $1.tokens },
+            peakDailyTokens: days.map(\.tokens).max(),
+            longestRunningTurnSec: 47_828,
+            currentStreakDays: 16,
+            longestStreakDays: 38,
+            dailyUsage: days)
+    }
+}
+
+private enum MenuBarStatusSnapshotCommand {
+    enum RenderError: LocalizedError {
+        case pngCreationFailed
+
+        var errorDescription: String? { "Could not encode the status snapshot." }
+    }
+
+    static func run(path: String) throws {
+        guard let appearance = NSAppearance(named: .darkAqua) else {
+            throw RenderError.pngCreationFailed
+        }
+        var renderFailure: Error?
+        appearance.performAsCurrentDrawingAppearance {
+            do {
+                try render(path: path)
+            } catch {
+                renderFailure = error
+            }
+        }
+        if let renderFailure { throw renderFailure }
+    }
+
+    private static func render(path: String) throws {
+        let weekly = RateWindow(
+            usedPercent: 9,
+            windowMinutes: 10_080,
+            resetsAt: nil,
+            resetDescription: nil)
+        let full = RateWindow(
+            usedPercent: 0,
+            windowMinutes: 300,
+            resetsAt: nil,
+            resetDescription: nil)
+        let status = MenuBarStatusImageRenderer.image(
+            selection: .combined,
+            metric: .bothPercent,
+            displayMode: .ringAndPercentage,
+            window: nil,
+            innerWindow: weekly,
+            percentText: "7d: 91%",
+            amountText: nil,
+            sideBySideEntries: [
+                MenuBarStatusEntry(
+                    window: nil,
+                    innerWindow: weekly,
+                    percentText: "7d: 91%",
+                    amountText: nil),
+                MenuBarStatusEntry(
+                    window: full,
+                    innerWindow: RateWindow(
+                        usedPercent: 0,
+                        windowMinutes: 10_080,
+                        resetsAt: nil,
+                        resetDescription: nil),
+                    percentText: "5h: 100%\n7d: 100%",
+                    amountText: nil),
+            ])
+        let scale: CGFloat = 2
+        let padding = CGSize(width: 8, height: 5)
+        let size = NSSize(
+            width: (status.size.width + padding.width * 2) * scale,
+            height: (max(status.size.height, 18) + padding.height * 2) * scale)
+        let canvas = NSImage(size: size, flipped: false) { rect in
+            NSColor.black.setFill()
+            rect.fill()
+            status.draw(in: NSRect(
+                x: padding.width * scale,
+                y: padding.height * scale,
+                width: status.size.width * scale,
+                height: status.size.height * scale))
+            return true
+        }
+        guard let tiff = canvas.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:])
+        else { throw RenderError.pngCreationFailed }
+        try png.write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+}
+
+private struct SnapshotBackdrop: View {
+    var kind: String
+    var colorScheme: ColorScheme
+
+    var body: some View {
+        ZStack {
+            base
+            if kind != "plain" {
+                Circle()
+                    .fill(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.42))
+                    .frame(width: 260, height: 260)
+                    .blur(radius: 18)
+                    .offset(x: -130, y: -220)
+                Circle()
+                    .fill(Color.blue.opacity(colorScheme == .dark ? 0.24 : 0.20))
+                    .frame(width: 300, height: 300)
+                    .blur(radius: 24)
+                    .offset(x: 150, y: 260)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var base: some View {
+        switch kind {
+        case "warm":
+            LinearGradient(
+                colors: [
+                    Color(red: 0.96, green: 0.74, blue: 0.54),
+                    Color(red: 0.66, green: 0.82, blue: 0.88),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing)
+        case "dark":
+            LinearGradient(
+                colors: [
+                    Color(red: 0.08, green: 0.10, blue: 0.18),
+                    Color(red: 0.22, green: 0.12, blue: 0.28),
+                    Color(red: 0.05, green: 0.25, blue: 0.28),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing)
+        case "mixed":
+            LinearGradient(
+                colors: [
+                    Color(red: 0.88, green: 0.42, blue: 0.32),
+                    Color(red: 0.30, green: 0.22, blue: 0.54),
+                    Color(red: 0.18, green: 0.62, blue: 0.60),
+                ],
+                startPoint: .top,
+                endPoint: .bottom)
+        default:
+            colorScheme == .dark ? Color.black : Color.white
+        }
+    }
 }
 
 struct MenuContentView: View {
     @ObservedObject var store: UsageStore
     var initialActivityPeriod: CodexActivityPeriod = .daily
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
     private static let refreshIntervals = [5, 15, 30, 60, 300, 900, 1_800, 3_600]
+    private static let footerLabelWidth: CGFloat = 48
+    // A width divisible by both 3- and 4-option pickers keeps native segment
+    // boundaries on whole Retina pixels instead of softening alternating labels.
+    private static let footerControlWidth: CGFloat = 276
+
+    private var visualTheme: UsageVisualTheme {
+        UsageVisualTheme(
+            colorScheme: colorScheme,
+            contrast: colorSchemeContrast)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            VStack(spacing: LayoutSpacing.related) {
+            VStack(spacing: 0) {
                 ForEach(store.trackedProviders) { provider in
-                    ProviderCard(
-                        provider: provider,
-                        state: store.states[provider] ?? ProviderState(),
-                        isTracking: store.isTracking(provider),
-                        refresh: { store.refresh(provider: provider) })
+                    if provider != store.trackedProviders.first {
+                        Divider()
+                    }
+                    providerSection(provider)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 12)
                 }
                 if store.trackedProviders.isEmpty {
                     Text("No providers selected")
                         .font(.callout)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(visualTheme.textColor)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                 }
-                if store.isTracking(.codex),
-                   let activity = store.states[.codex]?.snapshot?.codexActivity
-                {
-                    CodexActivityView(activity: activity, initialPeriod: initialActivityPeriod)
-                }
             }
-            .padding(12)
             Divider()
             footer
         }
+        .background(.thinMaterial)
+        .foregroundStyle(visualTheme.textColor)
+        .tint(visualTheme.accentColor)
+        .environment(
+            \.usageVisualTheme,
+            visualTheme)
     }
 
     private var header: some View {
@@ -382,11 +655,28 @@ struct MenuContentView: View {
         .padding(.vertical, 10)
     }
 
+    @ViewBuilder
+    private func providerSection(_ provider: Provider) -> some View {
+        VStack(alignment: .leading, spacing: LayoutSpacing.section) {
+            ProviderCard(
+                provider: provider,
+                state: store.states[provider] ?? ProviderState(),
+                isTracking: store.isTracking(provider),
+                refresh: { store.refresh(provider: provider) })
+            if provider == .codex,
+               let activity = store.states[.codex]?.snapshot?.codexActivity
+            {
+                CodexActivityView(activity: activity, initialPeriod: initialActivityPeriod)
+            }
+        }
+    }
+
     private var footer: some View {
         Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
             GridRow {
                 Text("Track")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(visualTheme.textColor)
+                    .frame(width: Self.footerLabelWidth, alignment: .leading)
                 HStack(spacing: 12) {
                     ForEach(Provider.allCases) { provider in
                         Toggle(provider.displayName, isOn: Binding(
@@ -395,10 +685,12 @@ struct MenuContentView: View {
                             .toggleStyle(.checkbox)
                     }
                 }
+                .frame(width: Self.footerControlWidth, alignment: .leading)
             }
             GridRow {
                 Text("Menu")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(visualTheme.textColor)
+                    .frame(width: Self.footerLabelWidth, alignment: .leading)
                 Picker("", selection: Binding(
                     get: { store.menuProvider },
                     set: { store.menuProvider = $0 }))
@@ -409,10 +701,13 @@ struct MenuContentView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
+                .focusable(false)
+                .frame(width: Self.footerControlWidth)
             }
             GridRow {
                 Text("Metric")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(visualTheme.textColor)
+                    .frame(width: Self.footerLabelWidth, alignment: .leading)
                 Picker("", selection: Binding(
                     get: { store.menuMetric },
                     set: { store.menuMetric = $0 }))
@@ -423,10 +718,13 @@ struct MenuContentView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
+                .focusable(false)
+                .frame(width: Self.footerControlWidth)
             }
             GridRow {
                 Text("Display")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(visualTheme.textColor)
+                    .frame(width: Self.footerLabelWidth, alignment: .leading)
                 Picker("", selection: Binding(
                     get: { store.menuDisplayMode },
                     set: { store.menuDisplayMode = $0 }))
@@ -437,26 +735,28 @@ struct MenuContentView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
+                .focusable(false)
+                .frame(width: Self.footerControlWidth)
             }
             GridRow {
                 Text("Refresh")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(visualTheme.textColor)
+                    .frame(width: Self.footerLabelWidth, alignment: .leading)
                 HStack(spacing: 10) {
-                    Slider(
-                        value: Binding(
-                            get: { Double(refreshIntervalIndex) },
-                            set: { setRefreshInterval(index: Int($0.rounded())) }),
-                        in: 0...Double(Self.refreshIntervals.count - 1),
-                        step: 1,
-                        onEditingChanged: { isEditing in
-                            if !isEditing {
-                                store.restartTimer()
-                            }
-                        })
+                    DiscreteRefreshSlider(
+                        index: Binding(
+                            get: { refreshIntervalIndex },
+                            set: { setRefreshInterval(index: $0) }),
+                        count: Self.refreshIntervals.count,
+                        valueLabel: refreshIntervalLabel,
+                        tint: visualTheme.accentColor,
+                        onEditingEnded: store.restartTimer)
+                    .padding(.horizontal, 10)
                     Text(refreshIntervalLabel)
                         .monospacedDigit()
                         .frame(width: 44, alignment: .trailing)
                 }
+                .frame(width: Self.footerControlWidth)
             }
         }
         .font(.callout)
@@ -465,27 +765,126 @@ struct MenuContentView: View {
 
     private var refreshIntervalIndex: Int {
         Self.refreshIntervals.enumerated().min {
-            abs($0.element - store.refreshSeconds) < abs($1.element - store.refreshSeconds)
+            abs($0.element - effectiveRefreshSeconds) < abs($1.element - effectiveRefreshSeconds)
         }?.offset ?? 3
     }
 
     private var refreshIntervalLabel: String {
-        switch store.refreshSeconds {
+        switch effectiveRefreshSeconds {
         case ..<60:
-            "\(store.refreshSeconds)s"
+            "\(effectiveRefreshSeconds)s"
         case ..<3_600:
-            "\(store.refreshSeconds / 60)m"
+            "\(effectiveRefreshSeconds / 60)m"
         default:
             "1h"
         }
     }
 
+    private var effectiveRefreshSeconds: Int {
+        store.renderingRefreshSeconds ?? store.refreshSeconds
+    }
+
     private func setRefreshInterval(index: Int) {
         let boundedIndex = min(max(index, 0), Self.refreshIntervals.count - 1)
         let seconds = Self.refreshIntervals[boundedIndex]
-        guard seconds != store.refreshSeconds else { return }
-        store.refreshSeconds = seconds
+        guard seconds != effectiveRefreshSeconds else { return }
+        if store.renderingRefreshSeconds != nil {
+            store.renderingRefreshSeconds = seconds
+        } else {
+            store.refreshSeconds = seconds
+        }
     }
+}
+
+private struct DiscreteRefreshSlider: View {
+    @Binding var index: Int
+    var count: Int
+    var valueLabel: String
+    var tint: Color
+    var onEditingEnded: () -> Void
+    @Environment(\.usageVisualTheme) private var theme
+
+    var body: some View {
+        GeometryReader { geometry in
+            let inset: CGFloat = 5
+            let usableWidth = max(1, geometry.size.width - inset * 2)
+            let fraction = count > 1
+                ? CGFloat(index) / CGFloat(count - 1)
+                : 0
+            let thumbX = inset + usableWidth * fraction
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(theme.controlTrack)
+                    .frame(height: 2)
+                    .padding(.horizontal, inset)
+
+                Capsule()
+                    .fill(tint.opacity(0.72))
+                    .frame(width: max(2, thumbX - inset), height: 2)
+                    .offset(x: inset)
+
+                ForEach(0..<max(count, 1), id: \.self) { tick in
+                    let tickFraction = count > 1
+                        ? CGFloat(tick) / CGFloat(count - 1)
+                        : 0
+                    Capsule()
+                        .fill(tick <= index ? tint : theme.controlTick)
+                        .frame(width: 1.5, height: 6)
+                        .position(
+                            x: inset + usableWidth * tickFraction,
+                            y: geometry.size.height / 2)
+                }
+
+                Capsule()
+                    .fill(tint)
+                    .frame(width: 8, height: 18)
+                    .shadow(color: theme.controlShadow, radius: 1, y: 1)
+                    .position(x: thumbX, y: geometry.size.height / 2)
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    guard count > 1 else { return }
+                    let x = min(max(value.location.x - inset, 0), usableWidth)
+                    let nextIndex = Int((x / usableWidth * CGFloat(count - 1)).rounded())
+                    guard nextIndex != index else { return }
+                    withAnimation(.easeOut(duration: 0.14)) {
+                        index = nextIndex
+                    }
+                }
+                .onEnded { _ in
+                    onEditingEnded()
+                })
+        }
+        .frame(height: 22)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Refresh interval")
+        .accessibilityValue(valueLabel)
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment:
+                withAnimation(.easeOut(duration: 0.14)) {
+                    index = min(index + 1, max(0, count - 1))
+                }
+                onEditingEnded()
+            case .decrement:
+                withAnimation(.easeOut(duration: 0.14)) {
+                    index = max(index - 1, 0)
+                }
+                onEditingEnded()
+            @unknown default:
+                break
+            }
+        }
+    }
+}
+
+struct MenuBarStatusEntry: Sendable {
+    var window: RateWindow?
+    var innerWindow: RateWindow?
+    var percentText: String?
+    var amountText: String?
 }
 
 struct MenuBarLabelView: View {
@@ -499,12 +898,22 @@ struct MenuBarLabelView: View {
             window: store.menuBarWindow,
             innerWindow: store.menuBarInnerWindow,
             percentText: store.menuBarPercentText,
-            amountText: store.menuBarAmountText))
+            amountText: store.menuBarAmountText,
+            sideBySideEntries: sideBySideEntries))
             .renderingMode(.original)
             .help(helpText)
     }
 
     private var helpText: String {
+        if let entries = sideBySideEntries {
+            return zip(Provider.allCases, entries).map { provider, entry in
+                let windows = [entry.window, entry.innerWindow].compactMap { window -> String? in
+                    guard let window else { return nil }
+                    return "\(window.durationLabel) \(DisplayFormatter.percent(window.remainingPercent)) left"
+                }
+                return "\(provider.displayName): \(windows.isEmpty ? entry.amountText ?? "No data" : windows.joined(separator: ", "))"
+            }.joined(separator: "; ")
+        }
         if store.menuMetric == .bothPercent {
             let summaries = [store.menuBarWindow, store.menuBarInnerWindow].compactMap { window -> String? in
                 guard let window else { return nil }
@@ -517,14 +926,52 @@ struct MenuBarLabelView: View {
         }
         return store.menuBarAmountText ?? "No usage data"
     }
+
+    private var sideBySideEntries: [MenuBarStatusEntry]? {
+        guard store.menuProvider == .combined else { return nil }
+        return Provider.allCases.map(statusEntry)
+    }
+
+    private func statusEntry(for provider: Provider) -> MenuBarStatusEntry {
+        let selection: MenuProviderSelection = provider == .codex ? .codex : .claude
+        let primaryMetric = store.menuMetric == .bothPercent
+            ? MenuMetric.fiveHourPercent
+            : store.menuMetric
+        let window = DisplayFormatter.selectedWindow(
+            states: store.states,
+            providerSelection: selection,
+            metric: primaryMetric)
+        let innerWindow = store.menuMetric == .bothPercent
+            ? DisplayFormatter.selectedWindow(
+                states: store.states,
+                providerSelection: selection,
+                metric: .sevenDayPercent)
+            : nil
+        let amountText = store.menuMetric == .billingDollars || (window == nil && innerWindow == nil)
+            ? DisplayFormatter.fallbackAmountText(
+                states: store.states,
+                providerSelection: selection)
+            : nil
+        return MenuBarStatusEntry(
+            window: window,
+            innerWindow: innerWindow,
+            percentText: DisplayFormatter.menuPercentText(
+                window: window,
+                innerWindow: innerWindow,
+                metric: store.menuMetric,
+                showUsed: false),
+            amountText: amountText)
+    }
 }
 
 enum MenuBarStatusImageRenderer {
     private static let ringDiameter: CGFloat = 18
     private static let ringTextSpacing: CGFloat = 8
+    private static let providerSpacing: CGFloat = 10
     private static let multilineFontSize: CGFloat = 9.5
     private static let multilineLineHeight: CGFloat = 10
     private static let multilineTextVerticalOffset: CGFloat = -1.25
+    private static let singleLineTextVerticalOffset: CGFloat = -0.75
 
     static func image(
         selection: MenuProviderSelection,
@@ -533,9 +980,25 @@ enum MenuBarStatusImageRenderer {
         window: RateWindow?,
         innerWindow: RateWindow? = nil,
         percentText: String?,
-        amountText: String?) -> NSImage
+        amountText: String?,
+        sideBySideEntries: [MenuBarStatusEntry]? = nil) -> NSImage
     {
-        _ = selection
+        if selection == .combined,
+           let sideBySideEntries,
+           sideBySideEntries.count > 1
+        {
+            let images = sideBySideEntries.map { entry in
+                self.image(
+                    selection: .codex,
+                    metric: metric,
+                    displayMode: displayMode,
+                    window: entry.window,
+                    innerWindow: entry.innerWindow,
+                    percentText: entry.percentText,
+                    amountText: entry.amountText)
+            }
+            return self.sideBySideImage(images)
+        }
         let availableWindow = window ?? innerWindow
         let showsProgress = metric != .billingDollars && availableWindow != nil
         let showsRing = showsProgress && displayMode != .percentage
@@ -573,6 +1036,25 @@ enum MenuBarStatusImageRenderer {
             if let text {
                 let x = showsRing ? ringSize + spacing : 0
                 self.drawText(text, at: CGPoint(x: x, y: (rect.height - textSize.height) / 2))
+            }
+            return true
+        }
+    }
+
+    private static func sideBySideImage(_ images: [NSImage]) -> NSImage {
+        let spacing = Self.providerSpacing
+        let width = images.reduce(0) { $0 + $1.size.width }
+            + spacing * CGFloat(max(0, images.count - 1))
+        let height = images.map(\.size.height).max() ?? Self.ringDiameter
+        return NSImage(size: NSSize(width: ceil(width), height: ceil(height)), flipped: false) { _ in
+            var x: CGFloat = 0
+            for image in images {
+                image.draw(
+                    at: NSPoint(x: x, y: (height - image.size.height) / 2),
+                    from: .zero,
+                    operation: .sourceOver,
+                    fraction: 1)
+                x += image.size.width + spacing
             }
             return true
         }
@@ -647,7 +1129,11 @@ enum MenuBarStatusImageRenderer {
         if lines.count <= 1 {
             let size = self.textSize(text)
             text.draw(
-                with: NSRect(origin: point, size: size),
+                with: NSRect(
+                    origin: CGPoint(
+                        x: point.x,
+                        y: point.y + Self.singleLineTextVerticalOffset),
+                    size: size),
                 options: [.usesLineFragmentOrigin],
                 attributes: self.textAttributes(for: text))
             return
@@ -715,6 +1201,7 @@ struct ProviderCard: View {
     var state: ProviderState
     var isTracking: Bool
     var refresh: () -> Void
+    @Environment(\.usageVisualTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: LayoutSpacing.section) {
@@ -730,59 +1217,50 @@ struct ProviderCard: View {
                 if state.snapshot?.rateWindows.isEmpty != false {
                     UsageBar(label: "Limits", window: nil)
                 }
+                if provider == .codex,
+                   let activity = state.snapshot?.codexActivity
+                {
+                    codexTokenSummary(activity)
+                }
                 amountRow
             }
 
             if let error = state.error {
                 Text(error)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(theme.errorText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(12)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
         .opacity(isTracking ? 1 : 0.55)
     }
 
-    @ViewBuilder
     private var providerHeader: some View {
-        if provider == .codex {
-            VStack(alignment: .leading, spacing: LayoutSpacing.compact) {
-                HStack(alignment: .firstTextBaseline, spacing: LayoutSpacing.related) {
-                    Text(provider.displayName)
-                        .font(.headline)
+        VStack(alignment: .leading, spacing: LayoutSpacing.compact) {
+            HStack(alignment: .firstTextBaseline, spacing: LayoutSpacing.related) {
+                Text(provider.displayName)
+                    .font(.headline)
+                if let planText {
                     Text(planText)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: LayoutSpacing.related)
-                    Text(updatedText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .padding(.trailing, state.isRefreshing ? 46 : 26)
+                        .foregroundStyle(theme.textColor)
                 }
+                Spacer(minLength: LayoutSpacing.related)
+                Text(updatedText)
+                    .font(.caption)
+                    .foregroundStyle(theme.textColor)
+                    .lineLimit(1)
+                    .padding(.trailing, state.isRefreshing ? 46 : 26)
+            }
+            if provider == .codex {
                 Text(streakText)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textColor)
                     .lineLimit(1)
             }
-            .overlay(alignment: .topTrailing) {
-                refreshControl
-            }
-        } else {
-            HStack(spacing: LayoutSpacing.related) {
-                VStack(alignment: .leading, spacing: LayoutSpacing.compact) {
-                    Text(provider.displayName)
-                        .font(.headline)
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
-                refreshControl
-            }
+        }
+        .overlay(alignment: .topTrailing) {
+            refreshControl
         }
     }
 
@@ -802,9 +1280,9 @@ struct ProviderCard: View {
         }
     }
 
-    private var planText: String {
+    private var planText: String? {
         guard isTracking else { return "Tracking off" }
-        return state.snapshot?.plan ?? "--"
+        return state.snapshot?.plan
     }
 
     private var updatedText: String {
@@ -824,52 +1302,51 @@ struct ProviderCard: View {
         return "Current streak \(current) · Longest \(longest)"
     }
 
-    private var subtitle: String {
-        guard isTracking else { return "Tracking disabled" }
-        if let snapshot = state.snapshot {
-            let account = snapshot.accountEmail ?? snapshot.plan ?? snapshot.source
-            return "Updated \(snapshot.updatedAt.formatted(date: .omitted, time: .shortened)) · \(account)"
-        }
-        if state.isRefreshing { return "Refreshing..." }
-        return "No data yet"
-    }
-
-    private var amountLabel: String {
-        guard let snapshot = state.snapshot else { return "Amount used" }
-        if snapshot.credits != nil { return "Credits" }
-        if snapshot.billingCost != nil { return "Billing period" }
-        if snapshot.localUsageCost != nil { return "Local usage" }
-        return "Amount used"
-    }
-
     private var amountValueText: String {
-        DisplayFormatter.amountText(state.snapshot) ?? DisplayFormatter.dollars(0)
+        DisplayFormatter.amountText(state.snapshot) ?? "--"
+    }
+
+    private func codexTokenSummary(_ activity: CodexActivitySnapshot) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: LayoutSpacing.related) {
+            Text("Tokens")
+                .foregroundStyle(theme.textColor)
+            Spacer(minLength: LayoutSpacing.related)
+            Text(tokenSummaryText(activity))
+                .monospacedDigit()
+                .lineLimit(1)
+        }
+        .font(.caption)
+    }
+
+    private func tokenSummaryText(_ activity: CodexActivitySnapshot) -> String {
+        let lifetime = DisplayFormatter.compactTokens(activity.lifetimeTokens)
+        let peakValue = DisplayFormatter.compactTokens(activity.peakDailyTokens)
+        guard let peak = activity.peakDailyTokens,
+              let day = activity.dailyUsage.first(where: { $0.tokens == peak }),
+              let date = day.date
+        else { return "\(lifetime) all time · \(peakValue) peak" }
+        let peakDate = date.formatted(.dateTime.month(.abbreviated).day())
+        return "\(lifetime) all time · \(peakValue) peak on \(peakDate)"
     }
 
     @ViewBuilder
     private var amountRow: some View {
-        if provider == .codex {
-            HStack(alignment: .firstTextBaseline, spacing: LayoutSpacing.related) {
+        HStack(alignment: .firstTextBaseline, spacing: LayoutSpacing.related) {
+            if provider == .codex {
                 ResetSummaryHoverLabel(
                     summary: resetSummaryText,
                     expirationHelp: resetExpirationHelp)
-                Spacer(minLength: LayoutSpacing.related)
-                Text("Credits: \(amountValueText)")
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .frame(minWidth: 96, alignment: .trailing)
+            } else {
+                Text(" ")
+                    .accessibilityHidden(true)
             }
-            .font(.caption)
-        } else {
-            HStack {
-                Text(amountLabel)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(amountValueText)
-                    .monospacedDigit()
-            }
-            .font(.caption)
+            Spacer(minLength: LayoutSpacing.related)
+            Text("Credits: \(amountValueText)")
+                .monospacedDigit()
+                .lineLimit(1)
+                .frame(minWidth: 96, alignment: .trailing)
         }
+        .font(.caption)
     }
 
     private var resetSummaryText: String {
@@ -899,31 +1376,7 @@ private struct CodexActivityView: View {
     }
 
     var body: some View {
-        VStack(spacing: LayoutSpacing.related) {
-            HStack(spacing: LayoutSpacing.related) {
-                ActivityStatPanel(
-                    label: "Lifetime",
-                    value: DisplayFormatter.compactTokens(activity.lifetimeTokens),
-                    detail: "tokens",
-                    helpText: activity.lifetimeTokens.map {
-                        "\(DisplayFormatter.compactTokens($0)) tokens"
-                    })
-                ActivityStatPanel(
-                    label: "Peak day",
-                    value: DisplayFormatter.compactTokens(activity.peakDailyTokens),
-                    detail: peakDateLabel,
-                    helpText: activity.peakDailyTokens.map {
-                        "\(peakDateLabel ?? "Peak") – \(DisplayFormatter.compactTokens($0))"
-                    })
-                ActivityStatPanel(
-                    label: "Longest chat",
-                    value: DisplayFormatter.duration(seconds: activity.longestRunningTurnSec),
-                    detail: "single turn",
-                    helpText: activity.longestRunningTurnSec.map {
-                        DisplayFormatter.duration(seconds: $0)
-                    })
-            }
-
+        VStack(spacing: ChartLayout.selectorSpacing) {
             Picker("Activity period", selection: $period) {
                 ForEach(CodexActivityPeriod.allCases) { period in
                     Text(period.rawValue).tag(period)
@@ -932,6 +1385,7 @@ private struct CodexActivityView: View {
             .labelsHidden()
             .pickerStyle(.segmented)
             .controlSize(.small)
+            .focusable(false)
             .frame(maxWidth: .infinity)
 
             Group {
@@ -952,67 +1406,10 @@ private struct CodexActivityView: View {
         activity.dailyUsage.sorted { $0.startDate < $1.startDate }
     }
 
-    private var peakDateLabel: String? {
-        guard let peak = activity.peakDailyTokens,
-              let day = sortedDays.first(where: { $0.tokens == peak }),
-              let date = day.date
-        else { return nil }
-        return date.formatted(.dateTime.month(.abbreviated).day())
-    }
-
     private var weeklyBuckets: [TokenWeekBucket] {
-        let calendar = Calendar.current
-        let dated = Dictionary(uniqueKeysWithValues: sortedDays.compactMap { day -> (Date, Int64)? in
-            guard let date = day.date else { return nil }
-            return (calendar.startOfDay(for: date), day.tokens)
-        })
-        let end = dated.keys.max() ?? calendar.startOfDay(for: Date())
-        let start = dated.keys.min() ?? end
-        let dayCount = (calendar.dateComponents([.day], from: start, to: end).day ?? 0) + 1
-        let bucketCount = max(12, (dayCount + 6) / 7)
-        return (0..<bucketCount).map { week in
-            let weeksAgo = bucketCount - 1 - week
-            let bucketEnd = calendar.date(byAdding: .day, value: -(weeksAgo * 7), to: end) ?? end
-            let bucketStart = calendar.date(byAdding: .day, value: -6, to: bucketEnd) ?? bucketEnd
-            let total = (0..<7).reduce(Int64(0)) { result, day in
-                let date = calendar.date(byAdding: .day, value: day, to: bucketStart) ?? bucketStart
-                return result + (dated[date] ?? 0)
-            }
-            return TokenWeekBucket(startDate: bucketStart, endDate: bucketEnd, tokens: total)
-        }
+        TokenWeekBucket.calendarWeeks(from: sortedDays)
     }
 
-}
-
-private struct ActivityStatPanel: View {
-    var label: String
-    var value: String
-    var detail: String?
-    var helpText: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: LayoutSpacing.compact) {
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Text(value)
-                .font(.headline)
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-            if let detail {
-                Text(detail)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
-        .padding(LayoutSpacing.inset)
-        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
-        .hoverDetail(helpText ?? "No details available")
-    }
 }
 
 private struct TokenPlotPoint: Identifiable {
@@ -1022,26 +1419,103 @@ private struct TokenPlotPoint: Identifiable {
     var id: Date { date }
 }
 
-private struct TokenWeekBucket: Identifiable {
-    var startDate: Date
-    var endDate: Date
-    var tokens: Int64
+private struct TokenCumulativePath: Shape {
+    var points: [TokenPlotPoint]
+    var maximumValue: Double
 
-    var id: Date { startDate }
+    var animatableData: Double {
+        get { maximumValue }
+        set { maximumValue = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        guard points.count > 1, maximumValue > 0 else { return path }
+        for (index, point) in points.enumerated() {
+            let x = rect.width * CGFloat(index) / CGFloat(points.count - 1)
+            let fraction = min(1, Double(point.tokens) / maximumValue)
+            let y = rect.height * (1 - CGFloat(fraction))
+            if index == 0 {
+                path.move(to: CGPoint(x: x, y: y))
+            } else {
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
+        }
+        return path
+    }
 }
 
 private enum ChartLayout {
+    static let selectorSpacing: CGFloat = 10
     static let plotHeight: CGFloat = 88
     static let timelineHeight: CGFloat = 110
-    static let axisLabelWidth: CGFloat = 26
+    static let axisLabelWidth: CGFloat = 20
     static let axisSpacing: CGFloat = LayoutSpacing.compact
     static let weekdayLabelWidth: CGFloat = 10
     static let ruleWidth: CGFloat = 1
     static let tooltipHalfWidth: CGFloat = 76
     static let hoverAnimation = Animation.easeOut(duration: 0.10)
+    static let scaleAnimation = Animation.easeInOut(duration: 0.20)
     static let heatmapHoverAnimation = Animation.easeOut(duration: 0.045)
     static let scrollIndicatorFadeDuration = 0.08
     static let legendRevealDelay = 0.10
+}
+
+private struct UsageVisualTheme: Equatable {
+    var colorScheme: ColorScheme
+    var contrast: ColorSchemeContrast
+
+    // System semantic colors resolve against the effective AppKit appearance
+    // and retain vibrancy when composited over the window's local material.
+    private var semanticPrimary: Color { Color(nsColor: .textColor) }
+    private var semanticSecondary: Color { Color(nsColor: .secondaryLabelColor) }
+    private var semanticTertiary: Color { Color(nsColor: .tertiaryLabelColor) }
+
+    var accentColor: Color { Color(nsColor: .systemBlue) }
+
+    private var contrastBoost: Double {
+        contrast == .increased ? 0.08 : 0
+    }
+
+    var textColor: Color {
+        semanticPrimary.opacity(
+            contrast == .increased ? 1.0 : colorScheme == .dark ? 0.70 : 0.78)
+    }
+
+    var errorText: Color {
+        Color(nsColor: .systemRed).opacity(contrast == .increased ? 1 : 0.88)
+    }
+
+    var emptyMark: Color { semanticPrimary.opacity(0.07 + contrastBoost / 2) }
+    var dataMark: Color { accentColor.opacity(min(1, 0.88 + contrastBoost)) }
+    var usageFill: Color { accentColor.opacity(min(1, 0.82 + contrastBoost)) }
+    var usageTrack: Color { semanticPrimary.opacity(0.10 + contrastBoost / 2) }
+    var controlTrack: Color { semanticPrimary.opacity(0.12 + contrastBoost / 2) }
+    var controlTick: Color { semanticSecondary.opacity(0.55 + contrastBoost) }
+    var chartRule: Color { Color(nsColor: .separatorColor) }
+    var scrollIndicator: Color { semanticSecondary.opacity(0.55 + contrastBoost) }
+    var popupBorder: Color { semanticTertiary.opacity(0.45 + contrastBoost) }
+    var controlShadow: Color { Color(nsColor: .shadowColor).opacity(0.16) }
+    var hoverFill: Color { accentColor.opacity(0.10 + contrastBoost / 2) }
+    var hoverOutline: Color { accentColor }
+
+    func heatmapMark(normalized: Double) -> Color {
+        accentColor.opacity(
+            min(1, 0.18 + contrastBoost + min(max(normalized, 0), 1) * 0.70))
+    }
+}
+
+private struct UsageVisualThemeKey: EnvironmentKey {
+    static let defaultValue = UsageVisualTheme(
+        colorScheme: .light,
+        contrast: .standard)
+}
+
+private extension EnvironmentValues {
+    var usageVisualTheme: UsageVisualTheme {
+        get { self[UsageVisualThemeKey.self] }
+        set { self[UsageVisualThemeKey.self] = newValue }
+    }
 }
 
 private struct ChartViewport: Equatable {
@@ -1065,6 +1539,7 @@ private struct CellSnapScrollTargetBehavior: ScrollTargetBehavior {
 private struct ChartDateLegend: View {
     var dates: [Date]
     var isHidden: Bool
+    @Environment(\.usageVisualTheme) private var theme
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1076,7 +1551,7 @@ private struct ChartDateLegend: View {
             }
         }
         .font(.caption2)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(theme.textColor)
         .opacity(isHidden ? 0 : 1)
         .allowsHitTesting(false)
     }
@@ -1085,6 +1560,7 @@ private struct ChartDateLegend: View {
 private struct ChartScrollIndicator: View {
     var viewport: ChartViewport
     var isVisible: Bool
+    @Environment(\.usageVisualTheme) private var theme
 
     var body: some View {
         GeometryReader { geometry in
@@ -1099,7 +1575,7 @@ private struct ChartScrollIndicator: View {
             let progress = min(max(viewport.offsetX / maximumOffset, 0), 1)
 
             Capsule()
-                .fill(Color.secondary.opacity(0.55))
+                .fill(theme.scrollIndicator)
                 .frame(width: thumbWidth, height: 3)
                 .offset(x: travel * progress)
                 .opacity(isVisible && hasOverflow ? 1 : 0)
@@ -1197,7 +1673,7 @@ private struct HeatmapModel {
 
 private struct HeatmapMetrics {
     let rowSpacing = LayoutSpacing.compact / 2
-    let columnSpacing = LayoutSpacing.compact / 2
+    let columnSpacing = LayoutSpacing.compact * 3 / 8
     let labelSpacing = LayoutSpacing.compact
     let cellSize: CGFloat
     let contentWidth: CGFloat
@@ -1225,6 +1701,7 @@ private struct TokenDailyHeatmap: View {
     @State private var legendHidden = false
     @State private var scrollIndicatorVisible = false
     @State private var legendRevealTask: Task<Void, Never>?
+    @Environment(\.usageVisualTheme) private var theme
 
     init(days: [TokenUsageDay]) {
         model = HeatmapModel(days: days)
@@ -1244,65 +1721,98 @@ private struct TokenDailyHeatmap: View {
             let upper = min(lower + 6, model.points.count - 1)
             return model.points[lower...upper].filter { $0.date <= model.latestDate }
         }
-        let visibleMaximum = Double(max(visiblePoints.map(\.tokens).max() ?? 0, 1))
+        let visibleMaximum = max(visiblePoints.map(\.tokens).max() ?? 0, 1)
+        let scaleMaximum = DisplayFormatter.roundedAxisMaximum(visibleMaximum)
+        let intensityLegendWidth = ChartLayout.axisLabelWidth
+            + LayoutSpacing.compact
+            + metrics.cellSize
         let legendDates = threeDates(weekRange.map { week in
             let index = min(week * 7 + 3, model.points.count - 1)
             return min(model.points[index].date, model.latestDate)
         })
 
-        HStack(alignment: .top, spacing: metrics.labelSpacing) {
-            VStack(spacing: metrics.rowSpacing) {
-                let weekdayLabels = ["M", "", "W", "", "F", "", "S"]
-                ForEach(weekdayLabels.indices, id: \.self) { index in
-                    Text(weekdayLabels[index])
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                        .frame(
-                            width: ChartLayout.weekdayLabelWidth,
-                            height: metrics.cellSize,
-                            alignment: .center)
-                }
-            }
-            ZStack(alignment: .bottom) {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 0) {
-                        ZStack(alignment: .topLeading) {
-                            HeatmapGrid(
-                                model: model,
-                                metrics: metrics,
-                                maximum: visibleMaximum)
-                            HeatmapHoverOverlay(
-                                model: model,
-                                metrics: metrics,
-                                viewport: viewport,
-                                plotSize: CGSize(
-                                    width: metrics.contentWidth,
-                                    height: ChartLayout.plotHeight))
-                        }
-                        .frame(width: metrics.contentWidth, height: ChartLayout.plotHeight)
-                        .frame(height: ChartLayout.timelineHeight, alignment: .top)
-                        Color.clear
-                            .frame(width: 1, height: 1)
-                            .id("heatmap-latest")
-                    }
-                    .scrollTargetLayout()
-                }
-                .defaultScrollAnchor(.trailing)
-                .scrollIndicators(.hidden)
-                .scrollPosition(id: $scrollTarget, anchor: .trailing)
-                .scrollTargetBehavior(CellSnapScrollTargetBehavior(
-                    step: metrics.cellSize + metrics.columnSpacing))
-                .trackChartScroll(
-                    viewport: $viewport,
-                    unitWidth: metrics.cellSize + metrics.columnSpacing,
-                    phaseChanged: updateScrollPhase)
+        GeometryReader { geometry in
+            let availablePlotWidth = max(
+                1,
+                geometry.size.width
+                    - ChartLayout.weekdayLabelWidth
+                    - intensityLegendWidth
+                    - metrics.labelSpacing * 2)
+            let weekStride = metrics.cellSize + metrics.columnSpacing
+            let visibleWeekCount = max(
+                1,
+                Int(floor(
+                    (availablePlotWidth + metrics.columnSpacing) / weekStride)))
+            let plotWidth = metrics.cellSize * CGFloat(visibleWeekCount)
+                + metrics.columnSpacing * CGFloat(visibleWeekCount - 1)
+            let trailingGap = metrics.labelSpacing
+                + max(0, availablePlotWidth - plotWidth)
 
-                ChartScrollIndicator(
-                    viewport: viewport,
-                    isVisible: scrollIndicatorVisible)
-                    .padding(.horizontal, 2)
-                ChartDateLegend(dates: legendDates, isHidden: legendHidden)
-                    .padding(.horizontal, 2)
+            HStack(alignment: .top, spacing: 0) {
+                VStack(spacing: metrics.rowSpacing) {
+                    let weekdayLabels = ["M", "", "W", "", "F", "", "S"]
+                    ForEach(weekdayLabels.indices, id: \.self) { index in
+                        Text(weekdayLabels[index])
+                            .font(.system(size: 9))
+                            .foregroundStyle(theme.textColor)
+                            .frame(
+                                width: ChartLayout.weekdayLabelWidth,
+                                height: metrics.cellSize,
+                                alignment: .center)
+                        }
+                    }
+                Color.clear
+                    .frame(width: metrics.labelSpacing, height: 1)
+                ZStack(alignment: .bottom) {
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 0) {
+                            ZStack(alignment: .topLeading) {
+                                HeatmapGrid(
+                                    model: model,
+                                    metrics: metrics,
+                                    maximum: Double(scaleMaximum))
+                                HeatmapHoverOverlay(
+                                    model: model,
+                                    metrics: metrics,
+                                    viewport: viewport,
+                                    plotSize: CGSize(
+                                        width: metrics.contentWidth,
+                                        height: ChartLayout.plotHeight))
+                            }
+                            .frame(width: metrics.contentWidth, height: ChartLayout.plotHeight)
+                            .frame(height: ChartLayout.timelineHeight, alignment: .top)
+                            Color.clear
+                                .frame(width: 1, height: 1)
+                                .id("heatmap-latest")
+                        }
+                        .scrollTargetLayout()
+                    }
+                    .defaultScrollAnchor(.trailing)
+                    .scrollIndicators(.hidden)
+                    .scrollPosition(id: $scrollTarget, anchor: .trailing)
+                    .scrollTargetBehavior(CellSnapScrollTargetBehavior(
+                        step: metrics.cellSize + metrics.columnSpacing))
+                    .trackChartScroll(
+                        viewport: $viewport,
+                        unitWidth: metrics.cellSize + metrics.columnSpacing,
+                        phaseChanged: updateScrollPhase)
+
+                    ChartScrollIndicator(
+                        viewport: viewport,
+                        isVisible: scrollIndicatorVisible)
+                        .padding(.horizontal, 2)
+                    ChartDateLegend(dates: legendDates, isHidden: legendHidden)
+                        .padding(.horizontal, 2)
+                }
+                .frame(width: plotWidth)
+
+                Color.clear
+                    .frame(width: trailingGap, height: 1)
+                HeatmapIntensityLegend(
+                    maximum: scaleMaximum,
+                    swatchSize: metrics.cellSize,
+                    rowSpacing: metrics.rowSpacing)
+                    .frame(width: intensityLegendWidth)
             }
         }
         .accessibilityElement(children: .ignore)
@@ -1336,6 +1846,7 @@ private struct HeatmapGrid: View {
     let model: HeatmapModel
     let metrics: HeatmapMetrics
     let maximum: Double
+    @Environment(\.usageVisualTheme) private var theme
 
     var body: some View {
         HStack(spacing: metrics.columnSpacing) {
@@ -1355,13 +1866,58 @@ private struct HeatmapGrid: View {
                 }
             }
         }
+        .animation(ChartLayout.scaleAnimation, value: maximum)
+        .animation(ChartLayout.scaleAnimation, value: model.points.map(\.tokens))
     }
 
     private func color(for value: Int64) -> Color {
-        guard value > 0 else { return Color.secondary.opacity(0.08) }
+        guard value > 0 else { return theme.emptyMark }
         let normalized = min(1, sqrt(Double(value) / maximum))
-        return Color.accentColor.opacity(0.2 + normalized * 0.8)
+        return theme.heatmapMark(normalized: normalized)
     }
+}
+
+private struct HeatmapIntensityLegend: View {
+    let maximum: Int64
+    let swatchSize: CGFloat
+    let rowSpacing: CGFloat
+    @Environment(\.usageVisualTheme) private var theme
+
+    var body: some View {
+        HStack(alignment: .top, spacing: LayoutSpacing.compact) {
+            VStack(alignment: .trailing) {
+                Text(DisplayFormatter.compactAxisTokens(maximum))
+                Spacer()
+                Text("0")
+            }
+            .font(.system(size: 9))
+            .foregroundStyle(theme.textColor)
+            .lineLimit(1)
+            .frame(width: ChartLayout.axisLabelWidth, height: ChartLayout.plotHeight)
+
+            VStack(spacing: rowSpacing) {
+                ForEach(Array((0..<7).reversed()), id: \.self) { level in
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(level == 0
+                            ? theme.emptyMark
+                            : theme.heatmapMark(
+                                normalized: Double(level) / 6))
+                        .frame(width: swatchSize, height: swatchSize)
+                }
+            }
+        }
+        .frame(width: legendWidth, height: ChartLayout.plotHeight, alignment: .topTrailing)
+        .contentTransition(.opacity)
+        .animation(ChartLayout.scaleAnimation, value: maximum)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            "Heatmap intensity from 0 to \(DisplayFormatter.compactAxisTokens(maximum)) tokens")
+    }
+
+    private var legendWidth: CGFloat {
+        ChartLayout.axisLabelWidth + LayoutSpacing.compact + swatchSize
+    }
+
 }
 
 private struct HeatmapHoverOverlay: View {
@@ -1371,6 +1927,7 @@ private struct HeatmapHoverOverlay: View {
     let plotSize: CGSize
     @State private var hoveredIndex: Int?
     @State private var highlightedIndex: Int
+    @Environment(\.usageVisualTheme) private var theme
 
     init(
         model: HeatmapModel,
@@ -1394,7 +1951,7 @@ private struct HeatmapHoverOverlay: View {
 
             let center = metrics.cellCenter(at: highlightedIndex)
             RoundedRectangle(cornerRadius: 2)
-                .stroke(Color.accentColor, lineWidth: 1.5)
+                .stroke(theme.hoverOutline, lineWidth: 1.5)
                 .frame(width: metrics.cellSize + 2, height: metrics.cellSize + 2)
                 .position(center)
                 .opacity(activeIndex == nil ? 0 : 1)
@@ -1500,6 +2057,7 @@ private struct TokenWeeklyBars: View {
     @State private var legendHidden = false
     @State private var scrollIndicatorVisible = false
     @State private var legendRevealTask: Task<Void, Never>?
+    @Environment(\.usageVisualTheme) private var theme
 
     init(buckets: [TokenWeekBucket]) {
         self.buckets = buckets
@@ -1511,7 +2069,7 @@ private struct TokenWeeklyBars: View {
         let range = visibleIndexRange(
             count: buckets.count,
             viewport: viewport,
-            defaultVisibleCount: 12)
+            defaultVisibleCount: 18)
         let visibleBuckets = range.map { Array(buckets[$0]) } ?? []
         let maximumValue = DisplayFormatter.roundedAxisMaximum(
             visibleBuckets.map(\.tokens).max() ?? 0)
@@ -1527,20 +2085,20 @@ private struct TokenWeeklyBars: View {
 
         HStack(alignment: .top, spacing: ChartLayout.axisSpacing) {
             VStack(alignment: .trailing) {
-                Text(DisplayFormatter.compactTokens(maximumValue))
+                Text(DisplayFormatter.compactAxisTokens(maximumValue))
                 Spacer()
                 Text("0")
             }
             .font(.caption2)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(theme.textColor)
             .lineLimit(1)
             .minimumScaleFactor(0.7)
             .frame(width: ChartLayout.axisLabelWidth, height: ChartLayout.plotHeight)
             Rectangle()
-                .fill(Color.secondary.opacity(0.3))
+                .fill(theme.chartRule)
                 .frame(width: ChartLayout.ruleWidth, height: ChartLayout.plotHeight)
             GeometryReader { geometry in
-                let baseColumnWidth = geometry.size.width / 12
+                let baseColumnWidth = geometry.size.width / 18
                 let contentWidth = max(
                     geometry.size.width,
                     baseColumnWidth * CGFloat(max(1, buckets.count)))
@@ -1555,7 +2113,7 @@ private struct TokenWeeklyBars: View {
                                 let activeIndex = hoveredIndex ?? forcedHoverIndex
                                 let highlightIndex = activeIndex ?? 0
                                 Rectangle()
-                                    .fill(Color.accentColor.opacity(0.06))
+                                    .fill(theme.hoverFill)
                                     .frame(width: columnWidth, height: ChartLayout.plotHeight)
                                     .position(
                                         x: (CGFloat(highlightIndex) + 0.5) * columnWidth,
@@ -1569,8 +2127,11 @@ private struct TokenWeeklyBars: View {
                                         let fraction = CGFloat(
                                             Double(bucket.tokens) / Double(maximumValue))
                                         RoundedRectangle(cornerRadius: 2)
-                                            .fill(Color.accentColor)
-                                            .frame(width: max(2, columnWidth - LayoutSpacing.compact))
+                                            .fill(theme.dataMark)
+                                            .frame(width: max(
+                                                2,
+                                                columnWidth
+                                                    - LayoutSpacing.compact * 2 / 3))
                                             .frame(
                                                 width: columnWidth,
                                                 height: max(
@@ -1584,6 +2145,9 @@ private struct TokenWeeklyBars: View {
                                     width: contentWidth,
                                     height: ChartLayout.plotHeight,
                                     alignment: .bottom)
+                                .animation(
+                                    ChartLayout.scaleAnimation,
+                                    value: maximumValue)
 
                                 if let activeIndex, buckets.indices.contains(activeIndex) {
                                     let centerX = (CGFloat(activeIndex) + 0.5) * columnWidth
@@ -1690,6 +2254,7 @@ private struct TokenCumulativeLine: View {
     @State private var legendHidden = false
     @State private var scrollIndicatorVisible = false
     @State private var legendRevealTask: Task<Void, Never>?
+    @Environment(\.usageVisualTheme) private var theme
 
     init(days: [TokenUsageDay]) {
         var total: Int64 = 0
@@ -1720,17 +2285,17 @@ private struct TokenCumulativeLine: View {
 
         HStack(alignment: .top, spacing: ChartLayout.axisSpacing) {
             VStack(alignment: .trailing) {
-                Text(DisplayFormatter.compactTokens(maximumValue))
+                Text(DisplayFormatter.compactAxisTokens(maximumValue))
                 Spacer()
                 Text("0")
             }
             .font(.caption2)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(theme.textColor)
             .lineLimit(1)
             .minimumScaleFactor(0.7)
             .frame(width: ChartLayout.axisLabelWidth, height: ChartLayout.plotHeight)
             Rectangle()
-                .fill(Color.secondary.opacity(0.3))
+                .fill(theme.chartRule)
                 .frame(width: ChartLayout.ruleWidth, height: ChartLayout.plotHeight)
             GeometryReader { geometry in
                 let contentWidth = max(
@@ -1751,39 +2316,31 @@ private struct TokenCumulativeLine: View {
                             }
 
                             ZStack(alignment: .topLeading) {
-                                Path { path in
-                                    guard points.count > 1 else { return }
-                                    for (index, point) in points.enumerated() {
-                                        let x = contentWidth * CGFloat(index)
-                                            / CGFloat(points.count - 1)
-                                        let y = ChartLayout.plotHeight * (1 - CGFloat(
-                                            Double(point.tokens) / Double(maximumValue)))
-                                        if index == 0 {
-                                            path.move(to: CGPoint(x: x, y: y))
-                                        } else {
-                                            path.addLine(to: CGPoint(x: x, y: y))
-                                        }
-                                    }
-                                }
+                                TokenCumulativePath(
+                                    points: points,
+                                    maximumValue: Double(maximumValue))
                                 .stroke(
-                                    Color.accentColor,
+                                    theme.dataMark,
                                     style: StrokeStyle(lineWidth: 2, lineJoin: .round))
+                                .animation(
+                                    ChartLayout.scaleAnimation,
+                                    value: maximumValue)
 
                                 if let activeLocation,
                                    let activeIndex,
                                    points.indices.contains(activeIndex)
                                 {
                                     Rectangle()
-                                        .fill(Color.secondary.opacity(0.55))
+                                        .fill(theme.scrollIndicator)
                                         .frame(width: 1, height: ChartLayout.plotHeight)
                                         .position(
                                             x: activeLocation.x,
                                             y: ChartLayout.plotHeight / 2)
 
                                     Circle()
-                                        .fill(Color.accentColor)
+                                        .fill(theme.hoverOutline)
                                         .overlay(Circle().stroke(
-                                            Color(nsColor: .windowBackgroundColor),
+                                            .background,
                                             lineWidth: 1.5))
                                         .frame(width: 7, height: 7)
                                         .position(
@@ -1793,6 +2350,9 @@ private struct TokenCumulativeLine: View {
                                                 points: points,
                                                 maximumValue: maximumValue,
                                                 size: plotSize))
+                                        .animation(
+                                            ChartLayout.scaleAnimation,
+                                            value: maximumValue)
 
                                     ChartHoverLabel(text: pointHelp(points[activeIndex]))
                                         .position(
@@ -1942,20 +2502,21 @@ private extension View {
 
 private struct ChartHoverLabel: View {
     var text: String
+    @Environment(\.usageVisualTheme) private var theme
 
     var body: some View {
         Text(text)
             .font(.caption2)
-            .foregroundStyle(.primary)
+            .foregroundStyle(theme.textColor)
             .fixedSize(horizontal: true, vertical: true)
             .padding(.horizontal, LayoutSpacing.inset)
             .padding(.vertical, LayoutSpacing.compact)
             .background(
-                Color(nsColor: .windowBackgroundColor),
+                .regularMaterial,
                 in: RoundedRectangle(cornerRadius: 6))
             .overlay {
                 RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color.secondary.opacity(0.35), lineWidth: 1)
+                    .stroke(theme.popupBorder, lineWidth: 1)
             }
             .shadow(color: .black.opacity(0.22), radius: 5, x: 0, y: 2)
             .allowsHitTesting(false)
@@ -2016,10 +2577,11 @@ struct ResetSummaryHoverLabel: View {
     @State private var isHovering = false
     @State private var showsPopup = false
     @State private var hoverTask: Task<Void, Never>?
+    @Environment(\.usageVisualTheme) private var theme
 
     var body: some View {
         Text(summary)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(theme.textColor)
             .lineLimit(1)
             .overlay(alignment: .leading) {
                 Rectangle()
@@ -2059,11 +2621,12 @@ struct ResetSummaryHoverLabel: View {
 
 struct ResetExpirationPopup: View {
     var text: String
+    @Environment(\.usageVisualTheme) private var theme
 
     var body: some View {
         Text(text)
             .font(.caption)
-            .foregroundStyle(.primary)
+            .foregroundStyle(theme.textColor)
             .multilineTextAlignment(.leading)
             .fixedSize(horizontal: true, vertical: true)
             .padding(.horizontal, 9)
@@ -2071,7 +2634,7 @@ struct ResetExpirationPopup: View {
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
             .overlay {
                 RoundedRectangle(cornerRadius: 6)
-                    .stroke(.quaternary, lineWidth: 1)
+                    .stroke(theme.popupBorder, lineWidth: 1)
             }
             .shadow(color: .black.opacity(0.18), radius: 10, x: 0, y: 4)
             .allowsHitTesting(false)
@@ -2081,15 +2644,16 @@ struct ResetExpirationPopup: View {
 struct UsageBar: View {
     var label: String
     var window: RateWindow?
+    @Environment(\.usageVisualTheme) private var theme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(label)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(theme.textColor)
                 if let refreshText {
                     Text(refreshText)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(theme.textColor)
                         .lineLimit(1)
                 }
                 Spacer()
@@ -2101,8 +2665,19 @@ struct UsageBar: View {
                 }
             }
             .font(.caption)
-            ProgressView(value: progress)
-                .tint(.primary)
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(theme.usageTrack)
+                    Capsule()
+                        .fill(theme.usageFill)
+                        .frame(width: geometry.size.width * progress)
+                }
+            }
+            .frame(height: 6)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(label) remaining")
+            .accessibilityValue(percentText)
         }
     }
 
@@ -2128,10 +2703,7 @@ struct UsageBar: View {
     }
 
     private static func formatResetDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.doesRelativeDateFormatting = false
-        formatter.dateFormat = "hh:mm a, MMM d"
-        return formatter.string(from: date)
+        DisplayFormatter.rateLimitResetDate(date)
     }
 
     private static func cleanResetDescription(_ text: String) -> String {

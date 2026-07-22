@@ -1,5 +1,9 @@
 import Foundation
 
+#if canImport(Security)
+import Security
+#endif
+
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -116,8 +120,12 @@ struct CodexUsageFetcher: UsageFetching {
         let limits = rateLimitsResponse.rateLimits
         let account = try? await rpc.fetchAccount()
         let activity = try? await CodexActivityCache.shared.fetch(using: rpc)
-        let resetCredits = (try? await CodexResetCreditFetcher(environment: environment).fetch())
-            ?? rateLimitsResponse.rateLimitResetCredits?.snapshot
+        let resetExpirationDetails = try? await CodexResetExpirationFetcher(environment: environment).fetch()
+        let resetCredits = rateLimitsResponse.rateLimitResetCredits.map {
+            ResetCreditSnapshot(
+                availableCount: $0.availableCount,
+                credits: resetExpirationDetails ?? [])
+        }
         let classifiedWindows = Self.classifyWindows(
             [limits.primary, limits.secondary].compactMap(Self.makeWindow))
         let now = Date()
@@ -261,18 +269,6 @@ private struct CodexAuthFile: Decodable {
 
 private struct CodexResetCreditsResponse: Decodable {
     let credits: [CodexResetCredit]
-    let availableCount: Int
-
-    enum CodingKeys: String, CodingKey {
-        case credits
-        case availableCount = "available_count"
-    }
-
-    var snapshot: ResetCreditSnapshot {
-        ResetCreditSnapshot(
-            availableCount: availableCount,
-            credits: credits.map(\.snapshot))
-    }
 }
 
 private struct CodexResetCredit: Decodable {
@@ -303,10 +299,10 @@ private struct CodexResetCredit: Decodable {
     }
 }
 
-private struct CodexResetCreditFetcher {
+private struct CodexResetExpirationFetcher {
     var environment: [String: String]
 
-    func fetch() async throws -> ResetCreditSnapshot {
+    func fetch() async throws -> [ResetCredit] {
         let auth = try readAuthFile()
         guard let url = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits") else {
             throw FetchError.malformed("invalid reset-credit endpoint")
@@ -337,7 +333,7 @@ private struct CodexResetCreditFetcher {
                 in: container,
                 debugDescription: "Invalid ISO date: \(raw)")
         }
-        return try decoder.decode(CodexResetCreditsResponse.self, from: data).snapshot
+        return try decoder.decode(CodexResetCreditsResponse.self, from: data).credits.map(\.snapshot)
     }
 
     private func readAuthFile() throws -> CodexAuthFile {
@@ -479,7 +475,7 @@ private final class CodexRPCClient: @unchecked Sendable {
     func initialize() async throws {
         _ = try await request(
             method: "initialize",
-            params: ["clientInfo": ["name": "codex-claude-bar", "version": "0.2"]],
+            params: ["clientInfo": ["name": "codex-claude-bar", "version": "0.3"]],
             timeout: 8)
         try sendNotification(method: "initialized")
     }
@@ -562,53 +558,300 @@ private final class CodexRPCClient: @unchecked Sendable {
 }
 
 struct ClaudeUsageFetcher: UsageFetching {
-    var environment: [String: String] = ProcessInfo.processInfo.environment
-    var costScanner = CostUsageScanner(provider: .claude)
-
     func fetch() async throws -> UsageSnapshot {
-        guard let binary = BinaryLocator.resolve("claude", env: environment) else {
-            throw FetchError.binaryNotFound("claude")
+        guard let credentials = ClaudeOAuthCredentialReader.loadFromKeychain() else {
+            throw FetchError.malformed(
+                "Claude OAuth credentials could not be read from Keychain")
         }
-        let usageText = try await PTYCommandSession.shared.captureClaudeUsage(
-            binary: binary,
-            environment: environment,
-            timeout: 20)
-        var parsed = try ClaudeUsageParser.parse(usageText: usageText)
-        if parsed.fiveHour != nil, parsed.accountEmail == nil, parsed.plan == nil {
-            let statusText = try? await PTYCommandSession.shared.capture(
-                subcommand: "/status",
-                binary: binary,
-                environment: environment,
-                timeout: 4,
-                stopWhen: { clean in
-                    clean.localizedCaseInsensitiveContains("Account") ||
-                        clean.localizedCaseInsensitiveContains("Login")
-                })
-            if let statusText {
-                parsed = try ClaudeUsageParser.parse(usageText: usageText, statusText: statusText)
+        guard !credentials.isExpired else {
+            throw FetchError.malformed(
+                "Claude OAuth credentials in Keychain have expired")
+        }
+        return try await ClaudeOAuthUsageFetcher.fetch(credentials: credentials)
+    }
+}
+
+struct ClaudeOAuthCredentials: Sendable {
+    var accessToken: String
+    var expiresAt: Date?
+    var subscriptionType: String?
+
+    var isExpired: Bool {
+        expiresAt.map { Date() >= $0 } ?? false
+    }
+}
+
+enum ClaudeOAuthCredentialReader {
+    private static let keychainService = "Claude Code-credentials"
+
+    static func loadFromKeychain() -> ClaudeOAuthCredentials? {
+        #if canImport(Security)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data
+        else { return nil }
+        return parse(data)
+        #else
+        return nil
+        #endif
+    }
+
+    static func parse(_ data: Data) -> ClaudeOAuthCredentials? {
+        struct Root: Decodable {
+            struct OAuth: Decodable {
+                var accessToken: String?
+                var expiresAt: Double?
+                var subscriptionType: String?
             }
+            var claudeAiOauth: OAuth?
         }
-        let localUsageCost = parsed.localUsageDollars.map {
-            CostSnapshot(dollars: $0, since: Date(), updatedAt: Date(), scannedFiles: 0)
+
+        guard let root = try? JSONDecoder().decode(Root.self, from: data),
+              let oauth = root.claudeAiOauth,
+              let token = oauth.accessToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty
+        else { return nil }
+        return ClaudeOAuthCredentials(
+            accessToken: token,
+            expiresAt: oauth.expiresAt.map { Date(timeIntervalSince1970: $0 / 1_000) },
+            subscriptionType: oauth.subscriptionType)
+    }
+}
+
+enum ClaudeOAuthUsageFetcher {
+    private static let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+    private static let gate = ClaudeOAuthUsageRateLimitGate()
+
+    static func fetch(credentials: ClaudeOAuthCredentials) async throws -> UsageSnapshot {
+        switch await gate.decision() {
+        case let .cached(snapshot):
+            return snapshot
+        case let .blocked(until):
+            throw ClaudeOAuthFetchError.rateLimited(until: until)
+        case .request:
+            break
         }
-        let scannedCost: CostSnapshot?
-        if environment["AIUSAGE_SCAN_CLAUDE_FILES"] == "1" {
-            scannedCost = (try? costScanner.scanCurrentBillingPeriod()).flatMap { snapshot in
-                localUsageCost != nil && snapshot.dollars == 0 ? nil : snapshot
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 8
+        request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.setValue("claude-code/2.1.0", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw FetchError.malformed("missing Claude OAuth HTTP response")
+        }
+        if http.statusCode == 429 {
+            let retryAfter = retryAfterDate(from: http)
+            if let cached = await gate.recordRateLimit(retryAfter: retryAfter) {
+                return cached
             }
-        } else {
-            scannedCost = nil
+            throw ClaudeOAuthFetchError.rateLimited(
+                until: await gate.currentBlockedUntil())
+        }
+        guard http.statusCode == 200 else {
+            throw FetchError.malformed("Claude OAuth returned HTTP \(http.statusCode)")
+        }
+        let snapshot = try snapshot(from: data, subscriptionType: credentials.subscriptionType)
+        await gate.recordSuccess(snapshot)
+        return snapshot
+    }
+
+    static func snapshot(
+        from data: Data,
+        subscriptionType: String? = nil,
+        updatedAt: Date = Date()
+    ) throws -> UsageSnapshot {
+        let response: Response
+        do {
+            response = try JSONDecoder().decode(Response.self, from: data)
+        } catch {
+            throw FetchError.parseFailed("invalid Claude OAuth usage response")
         }
         return UsageSnapshot(
             provider: .claude,
-            fiveHour: parsed.fiveHour,
-            sevenDay: parsed.sevenDay,
-            billingCost: scannedCost,
-            localUsageCost: localUsageCost,
-            accountEmail: parsed.accountEmail,
-            plan: parsed.plan,
-            source: "claude /usage",
-            updatedAt: Date())
+            fiveHour: rateWindow(response.fiveHour, minutes: 5 * 60),
+            sevenDay: rateWindow(response.sevenDay, minutes: 7 * 24 * 60),
+            credits: creditSnapshot(response.extraUsage),
+            billingCost: nil,
+            localUsageCost: nil,
+            accountEmail: nil,
+            plan: planName(subscriptionType),
+            source: "claude oauth",
+            updatedAt: updatedAt)
+    }
+
+    private static func rateWindow(_ window: Response.Window?, minutes: Int) -> RateWindow? {
+        guard let window, let utilization = window.utilization else { return nil }
+        return RateWindow(
+            usedPercent: max(0, min(100, utilization)),
+            windowMinutes: minutes,
+            resetsAt: parseISO8601(window.resetsAt),
+            resetDescription: nil)
+    }
+
+    private static func creditSnapshot(_ extraUsage: Response.ExtraUsage?) -> CreditSnapshot? {
+        guard let extraUsage, extraUsage.isEnabled == true,
+              let monthlyLimit = extraUsage.monthlyLimit
+        else { return nil }
+        // Claude OAuth reports monetary values in minor currency units (for
+        // example, 10000 USD means $100.00), matching Claude's web API.
+        let remaining = max(0, monthlyLimit - (extraUsage.usedCredits ?? 0)) / 100
+        return CreditSnapshot(
+            balance: remaining,
+            hasCredits: true,
+            unlimited: false,
+            currencyCode: extraUsage.currency)
+    }
+
+    private static func parseISO8601(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
+
+    private static func retryAfterDate(from response: HTTPURLResponse, now: Date = Date()) -> Date? {
+        guard let value = response.value(forHTTPHeaderField: "Retry-After")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !value.isEmpty
+        else { return nil }
+        if let seconds = TimeInterval(value), seconds >= 0 {
+            return now.addingTimeInterval(seconds)
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss zzz"
+        return formatter.date(from: value)
+    }
+
+    private static func planName(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty
+        else { return nil }
+        let name = value.replacingOccurrences(of: "_", with: " ").capitalized
+        return name.localizedCaseInsensitiveContains("claude") ? name : "Claude \(name)"
+    }
+
+    private struct Response: Decodable {
+        struct Window: Decodable {
+            var utilization: Double?
+            var resetsAt: String?
+
+            enum CodingKeys: String, CodingKey {
+                case utilization
+                case resetsAt = "resets_at"
+            }
+        }
+
+        struct ExtraUsage: Decodable {
+            var isEnabled: Bool?
+            var monthlyLimit: Double?
+            var usedCredits: Double?
+            var utilization: Double?
+            var currency: String?
+
+            enum CodingKeys: String, CodingKey {
+                case isEnabled = "is_enabled"
+                case monthlyLimit = "monthly_limit"
+                case usedCredits = "used_credits"
+                case utilization
+                case currency
+            }
+        }
+
+        var fiveHour: Window?
+        var sevenDay: Window?
+        var extraUsage: ExtraUsage?
+
+        enum CodingKeys: String, CodingKey {
+            case fiveHour = "five_hour"
+            case sevenDay = "seven_day"
+            case extraUsage = "extra_usage"
+        }
+    }
+}
+
+private enum ClaudeOAuthFetchError: LocalizedError {
+    case rateLimited(until: Date?)
+
+    var errorDescription: String? {
+        switch self {
+        case let .rateLimited(until):
+            if let until {
+                return "Claude usage is rate limited; retrying after \(DisplayFormatter.rateLimitResetDate(until))."
+            }
+            return "Claude usage is rate limited; retrying in a few minutes."
+        }
+    }
+}
+
+private actor ClaudeOAuthUsageRateLimitGate {
+    enum Decision: Sendable {
+        case request
+        case cached(UsageSnapshot)
+        case blocked(Date?)
+    }
+
+    private static let minimumRefreshInterval: TimeInterval = 60
+    private static let defaultRateLimitCooldown: TimeInterval = 5 * 60
+    private static let blockedUntilDefaultsKey = "claudeOAuthUsageBlockedUntil"
+
+    private var cachedSnapshot: UsageSnapshot?
+    private var lastSuccessfulFetchAt: Date?
+    private var blockedUntil: Date?
+
+    func decision(now: Date = Date()) -> Decision {
+        let persistedBlockedUntil = UserDefaults.standard.object(
+            forKey: Self.blockedUntilDefaultsKey) as? Double
+        if blockedUntil == nil, let persistedBlockedUntil {
+            blockedUntil = Date(timeIntervalSince1970: persistedBlockedUntil)
+        }
+        if let blockedUntil, blockedUntil > now {
+            return cachedSnapshot.map(Decision.cached) ?? .blocked(blockedUntil)
+        }
+        self.blockedUntil = nil
+        UserDefaults.standard.removeObject(forKey: Self.blockedUntilDefaultsKey)
+        if let cachedSnapshot, let lastSuccessfulFetchAt,
+           now.timeIntervalSince(lastSuccessfulFetchAt) < Self.minimumRefreshInterval
+        {
+            return .cached(cachedSnapshot)
+        }
+        return .request
+    }
+
+    func recordSuccess(_ snapshot: UsageSnapshot, now: Date = Date()) {
+        cachedSnapshot = snapshot
+        lastSuccessfulFetchAt = now
+        blockedUntil = nil
+        UserDefaults.standard.removeObject(forKey: Self.blockedUntilDefaultsKey)
+    }
+
+    func recordRateLimit(retryAfter: Date?, now: Date = Date()) -> UsageSnapshot? {
+        let fallback = now.addingTimeInterval(Self.defaultRateLimitCooldown)
+        let candidate = max(retryAfter ?? fallback, fallback)
+        blockedUntil = max(blockedUntil ?? candidate, candidate)
+        UserDefaults.standard.set(
+            blockedUntil?.timeIntervalSince1970,
+            forKey: Self.blockedUntilDefaultsKey)
+        return cachedSnapshot
+    }
+
+    func currentBlockedUntil() -> Date? {
+        blockedUntil
     }
 }
 
@@ -781,7 +1024,7 @@ enum ClaudeUsageParser {
         return nil
     }
 
-    private static func parseResetDate(_ text: String?, now: Date = Date()) -> Date? {
+    static func parseResetDate(_ text: String?, now: Date = Date()) -> Date? {
         guard var raw = text?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
             return nil
         }
@@ -789,6 +1032,29 @@ enum ClaudeUsageParser {
         raw = raw.replacingOccurrences(of: " at ", with: " ", options: .caseInsensitive)
         raw = raw.replacingOccurrences(of: #"\s*\([^)]+\)"#, with: "", options: .regularExpression)
         raw = raw.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+
+        // Claude's terminal renderer sometimes removes all visual spacing, for
+        // example `Jul28at11am` or `9:20pm`. Canonicalize those forms before
+        // handing them to DateFormatter.
+        if let compactDate = extractFirst(
+            pattern: #"(?i)([A-Z]{3}\s*[0-9]{1,2}(?:,)?(?:\s*at)?\s*[0-9]{1,2}(?::[0-9]{2})?\s*(?:AM|PM))"#,
+            text: raw)
+        {
+            raw = compactDate
+                .replacingOccurrences(
+                    of: #"(?i)^([A-Z]{3})\s*([0-9]{1,2}),?\s*(?:at)?\s*"#,
+                    with: "$1 $2 ",
+                    options: .regularExpression)
+                .replacingOccurrences(of: #"(?i)\s*(AM|PM)$"#, with: "$1", options: .regularExpression)
+        } else if let compactTime = extractFirst(
+            pattern: #"(?i)([0-9]{1,2}(?::[0-9]{2})?\s*(?:AM|PM))"#,
+            text: raw)
+        {
+            raw = compactTime.replacingOccurrences(
+                of: #"(?i)\s*(AM|PM)$"#,
+                with: "$1",
+                options: .regularExpression)
+        }
 
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -808,7 +1074,10 @@ enum ClaudeUsageParser {
                     if let anchored, anchored >= now { return anchored }
                     return anchored.flatMap { calendar.date(byAdding: .day, value: 1, to: $0) }
                 }
-                return parsed
+                if parsed >= now { return parsed }
+                var calendar = Calendar.current
+                calendar.timeZone = formatter.timeZone
+                return calendar.date(byAdding: .year, value: 1, to: parsed)
             }
         }
         return nil
@@ -838,11 +1107,11 @@ actor PTYCommandSession {
     private var binaryPath: String?
 
     func captureClaudeUsage(binary: String, environment: [String: String], timeout: TimeInterval) async throws -> String {
-        var output = try await capture(
+        try await capture(
             subcommand: "/usage",
             binary: binary,
             environment: environment,
-            timeout: min(timeout, 8),
+            timeout: timeout,
             stopWhen: { clean in
                 let compact = clean.lowercased().filter { !$0.isWhitespace }
                 let hasQuotaPanel = compact.contains("currentsession") &&
@@ -851,22 +1120,6 @@ actor PTYCommandSession {
                     ClaudeUsageParser.isSubscriptionNoticeOnly(clean) ||
                     ClaudeUsageParser.isLocalUsageOnly(clean)
             })
-        if !output.localizedCaseInsensitiveContains("Current session"),
-           !ClaudeUsageParser.isSubscriptionNoticeOnly(output),
-           !ClaudeUsageParser.isLocalUsageOnly(output)
-        {
-            output = try await capture(
-                subcommand: "/usage",
-                binary: binary,
-                environment: environment,
-                timeout: 8,
-                stopWhen: { clean in
-                    clean.localizedCaseInsensitiveContains("Current session") ||
-                        ClaudeUsageParser.isSubscriptionNoticeOnly(clean) ||
-                        ClaudeUsageParser.isLocalUsageOnly(clean)
-                })
-        }
-        return output
     }
 
     func capture(
@@ -941,8 +1194,11 @@ actor PTYCommandSession {
         process.standardInput = secondaryHandle
         process.standardOutput = secondaryHandle
         process.standardError = secondaryHandle
-        process.environment = Self.claudeEnvironment(environment)
-        process.currentDirectoryURL = Self.probeDirectory()
+        let probeDirectory = Self.probeDirectory()
+        process.environment = Self.claudeEnvironment(
+            environment,
+            workingDirectory: probeDirectory)
+        process.currentDirectoryURL = probeDirectory
 
         do {
             try process.run()
@@ -959,11 +1215,16 @@ actor PTYCommandSession {
         self.binaryPath = binary
     }
 
-    private static func claudeEnvironment(_ base: [String: String]) -> [String: String] {
+    static func claudeEnvironment(
+        _ base: [String: String],
+        workingDirectory: URL
+    ) -> [String: String] {
         var env = BinaryLocator.enrichedEnvironment(base)
         for key in env.keys where key.hasPrefix("ANTHROPIC_") {
             env.removeValue(forKey: key)
         }
+        env["PWD"] = workingDirectory.path
+        env.removeValue(forKey: "OLDPWD")
         return env
     }
 

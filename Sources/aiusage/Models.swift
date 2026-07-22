@@ -28,8 +28,8 @@ enum MenuProviderSelection: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .codex: "Codex"
-        case .claude: "Claude Code"
-        case .combined: "Combined"
+        case .claude: "Claude"
+        case .combined: "Both"
         }
     }
 
@@ -39,6 +39,13 @@ enum MenuProviderSelection: String, CaseIterable, Identifiable {
         case .claude: .claude
         case .combined: nil
         }
+    }
+
+    func constrained(to trackedProviders: [Provider]) -> MenuProviderSelection {
+        guard trackedProviders.count == 1, let provider = trackedProviders.first else {
+            return self
+        }
+        return provider == .codex ? .codex : .claude
     }
 }
 
@@ -114,6 +121,7 @@ struct CreditSnapshot: Codable, Equatable, Sendable {
     var balance: Double?
     var hasCredits: Bool
     var unlimited: Bool
+    var currencyCode: String? = nil
 }
 
 struct ResetCredit: Codable, Equatable, Sendable {
@@ -147,6 +155,71 @@ struct TokenUsageDay: Codable, Equatable, Sendable, Identifiable {
         dateComponents.day = components[2]
         dateComponents.hour = 12
         return dateComponents.date
+    }
+}
+
+struct TokenWeekBucket: Identifiable {
+    var startDate: Date
+    var endDate: Date
+    var tokens: Int64
+
+    var id: Date { startDate }
+
+    static func calendarWeeks(
+        from days: [TokenUsageDay],
+        calendar sourceCalendar: Calendar = .current,
+        minimumCount: Int = 12
+    ) -> [TokenWeekBucket] {
+        var calendar = sourceCalendar
+        calendar.firstWeekday = 2
+
+        let dated = Dictionary(uniqueKeysWithValues: days.compactMap { day -> (Date, Int64)? in
+            guard let date = day.date else { return nil }
+            return (calendar.startOfDay(for: date), day.tokens)
+        })
+        let latestDay = dated.keys.max() ?? calendar.startOfDay(for: Date())
+        let earliestDay = dated.keys.min() ?? latestDay
+        let latestWeekStart = monday(for: latestDay, calendar: calendar)
+        let earliestWeekStart = monday(for: earliestDay, calendar: calendar)
+        let dataWeekCount = ((calendar.dateComponents(
+            [.day],
+            from: earliestWeekStart,
+            to: latestWeekStart).day ?? 0) / 7) + 1
+        let bucketCount = max(minimumCount, dataWeekCount)
+
+        return (0..<bucketCount).map { index in
+            let weeksAgo = bucketCount - 1 - index
+            let startDate = calendar.date(
+                byAdding: .day,
+                value: -(weeksAgo * 7),
+                to: latestWeekStart) ?? latestWeekStart
+            let fullWeekEnd = calendar.date(
+                byAdding: .day,
+                value: 6,
+                to: startDate) ?? startDate
+            let endDate = min(fullWeekEnd, latestDay)
+            let dayCount = (calendar.dateComponents(
+                [.day],
+                from: startDate,
+                to: endDate).day ?? 0) + 1
+            let tokens = (0..<max(0, dayCount)).reduce(Int64(0)) { total, offset in
+                let date = calendar.date(
+                    byAdding: .day,
+                    value: offset,
+                    to: startDate) ?? startDate
+                return total + (dated[date] ?? 0)
+            }
+            return TokenWeekBucket(startDate: startDate, endDate: endDate, tokens: tokens)
+        }
+    }
+
+    private static func monday(for date: Date, calendar: Calendar) -> Date {
+        let startOfDay = calendar.startOfDay(for: date)
+        let daysSinceMonday = (calendar.component(.weekday, from: startOfDay) + 5) % 7
+        return calendar.date(
+            byAdding: .day,
+            value: -daysSinceMonday,
+            to: startOfDay) ?? startOfDay
     }
 }
 
@@ -185,6 +258,14 @@ struct ProviderState: Equatable {
 }
 
 enum DisplayFormatter {
+    static func rateLimitResetDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.doesRelativeDateFormatting = false
+        formatter.dateFormat = "hh:mm a, MMM d"
+        return formatter.string(from: date)
+    }
+
     static func percent(_ value: Double) -> String {
         "\(Int(max(0, min(100, value)).rounded()))%"
     }
@@ -226,6 +307,35 @@ enum DisplayFormatter {
         return "\(number)\(suffix)"
     }
 
+    static func compactAxisTokens(_ value: Int64) -> String {
+        let absolute = abs(Double(value))
+        let divisor: Double
+        let suffix: String
+        switch absolute {
+        case 100_000_000..<1_000_000_000:
+            divisor = 1_000_000_000
+            suffix = "B"
+        case 100_000..<1_000_000:
+            divisor = 1_000_000
+            suffix = "M"
+        case 100..<1_000:
+            divisor = 1_000
+            suffix = "K"
+        default:
+            return compactTokens(value)
+        }
+
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = 1
+        let scaled = Double(value) / divisor
+        let number = formatter.string(from: NSNumber(value: scaled))
+            ?? String(format: "%.1f", scaled)
+        return "\(number)\(suffix)"
+    }
+
     static func duration(seconds: Int64?) -> String {
         guard let seconds else { return "--" }
         let hours = seconds / 3_600
@@ -238,20 +348,39 @@ enum DisplayFormatter {
     static func roundedAxisMaximum(_ value: Int64) -> Int64 {
         guard value > 0 else { return 1 }
         let magnitude = pow(10, floor(log10(Double(value))))
-        let normalized = Double(value) / magnitude
-        let step = [1.0, 2.0, 2.5, 5.0, 10.0].first { normalized <= $0 } ?? 10
-        return Int64((step * magnitude).rounded(.up))
+        let preferredSteps = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0]
+        let minimumWithHeadroom = Double(value) * 1.05
+        let candidates = preferredSteps.map { $0 * magnitude }
+        var candidateIndex = candidates.firstIndex { $0 >= minimumWithHeadroom }
+            ?? candidates.index(before: candidates.endIndex)
+
+        if candidates[candidateIndex] / Double(value) > 1.40, candidateIndex > candidates.startIndex {
+            let previous = candidates[candidates.index(before: candidateIndex)]
+            if previous > Double(value) {
+                candidateIndex = candidates.index(before: candidateIndex)
+            }
+        }
+
+        return Int64(candidates[candidateIndex].rounded(.up))
     }
 
     static func credits(_ snapshot: CreditSnapshot) -> String {
         if snapshot.unlimited { return "Unlimited" }
         guard snapshot.hasCredits, let balance = snapshot.balance else { return "--" }
 
+        if snapshot.currencyCode?.uppercased() == "USD" {
+            return dollars(balance)
+        }
+
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         formatter.maximumFractionDigits = balance < 100 ? 2 : 0
         formatter.minimumFractionDigits = 0
-        return formatter.string(from: NSNumber(value: balance)) ?? String(format: "%.0f", balance)
+        let amount = formatter.string(from: NSNumber(value: balance)) ?? String(format: "%.0f", balance)
+        if let currencyCode = snapshot.currencyCode?.uppercased(), !currencyCode.isEmpty {
+            return "\(amount) \(currencyCode)"
+        }
+        return amount
     }
 
     static func resetSummary(_ snapshot: ResetCreditSnapshot?) -> String {

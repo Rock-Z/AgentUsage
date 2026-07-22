@@ -18,9 +18,16 @@ enum SelfTest {
         try testMenuTitleShowsCombinedClaudeBillingDollars()
         try testMenuTitleFallsBackToDollarsWhenWindowMissing()
         try testClaudeUsageParserReadsSessionAndWeeklyPercentLeft()
+        try testClaudeOAuthUsageParserReadsWindows()
+        try testClaudeOAuthCredentialParserReadsClaudeCodeShape()
+        try testClaudeUsageParserReadsCompressedResetDates()
         try testClaudeUsageParserReadsLocalTotalCost()
+        try testClaudeProbeEnvironmentDoesNotLeakCallingDirectory()
         try testDurationLabelsAndCodexWindowClassification()
         try testCodexAccountUsageParsingAndFormatting()
+        try testPreferredAxisMaximums()
+        try testMenuProviderSelectionFollowsSingleTrackedProvider()
+        try testWeeklyActivityUsesMondayThroughSundayBuckets()
         try testPartialDualLimitFormatting()
         try testCostScannerOnlyCountsCurrentBillingPeriodExplicitCosts()
         try testResetCreditSummaryAndExpirationHelp()
@@ -171,6 +178,77 @@ enum SelfTest {
         try expect(parsed.plan == "Claude local usage", "expected local usage plan marker")
     }
 
+    private static func testClaudeOAuthUsageParserReadsWindows() throws {
+        let data = Data(#"{"five_hour":{"utilization":28.5,"resets_at":"2026-07-21T21:20:00Z"},"seven_day":{"utilization":62,"resets_at":"2026-07-28T18:00:00Z"},"extra_usage":{"is_enabled":true,"monthly_limit":10000,"used_credits":3750,"utilization":37.5,"currency":"USD"}}"#.utf8)
+        let updatedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let snapshot = try ClaudeOAuthUsageFetcher.snapshot(
+            from: data,
+            subscriptionType: "max",
+            updatedAt: updatedAt)
+
+        try expect(snapshot.fiveHour?.usedPercent == 28.5, "expected OAuth 5h utilization")
+        try expect(snapshot.sevenDay?.usedPercent == 62, "expected OAuth 7d utilization")
+        try expect(snapshot.fiveHour?.resetsAt != nil, "expected OAuth 5h reset")
+        try expect(snapshot.sevenDay?.resetsAt != nil, "expected OAuth 7d reset")
+        try expect(snapshot.plan == "Claude Max", "expected OAuth subscription plan")
+        try expect(snapshot.credits?.balance == 62.5, "expected remaining OAuth extra-usage credits")
+        try expect(snapshot.credits?.currencyCode == "USD", "expected OAuth credit currency")
+        try expect(DisplayFormatter.amountText(snapshot) == "$62.50", "expected formatted OAuth credit balance")
+        try expect(snapshot.source == "claude oauth", "expected OAuth source label")
+        try expect(snapshot.updatedAt == updatedAt, "expected supplied OAuth update time")
+    }
+
+    private static func testClaudeOAuthCredentialParserReadsClaudeCodeShape() throws {
+        let data = Data(#"{"claudeAiOauth":{"accessToken":"token","expiresAt":1800000000000,"subscriptionType":"pro"}}"#.utf8)
+        let credentials = ClaudeOAuthCredentialReader.parse(data)
+
+        try expect(credentials?.accessToken == "token", "expected Claude OAuth access token")
+        try expect(credentials?.subscriptionType == "pro", "expected Claude OAuth subscription type")
+        try expect(
+            credentials?.expiresAt == Date(timeIntervalSince1970: 1_800_000_000),
+            "expected millisecond OAuth expiration")
+    }
+
+    private static func testClaudeUsageParserReadsCompressedResetDates() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        let now = calendar.date(from: DateComponents(year: 2026, month: 7, day: 21, hour: 16))!
+        let session = ClaudeUsageParser.parseResetDate(
+            "Resets9:20pm(America/Los_Angeles)",
+            now: now)
+        let weekly = ClaudeUsageParser.parseResetDate(
+            "ResetsJul28at11am(America/Los_Angeles)",
+            now: now)
+
+        try expect(session != nil, "expected compressed Claude session reset to parse")
+        try expect(weekly != nil, "expected compressed Claude weekly reset to parse")
+        try expect(
+            session.map(DisplayFormatter.rateLimitResetDate) == "09:20 PM, Jul 21",
+            "expected canonical Claude session reset label")
+        try expect(
+            weekly.map(DisplayFormatter.rateLimitResetDate) == "11:00 AM, Jul 28",
+            "expected canonical Claude weekly reset label")
+    }
+
+    private static func testClaudeProbeEnvironmentDoesNotLeakCallingDirectory() throws {
+        let probeDirectory = URL(fileURLWithPath: "/tmp/aiusage-ClaudeProbe", isDirectory: true)
+        let environment = PTYCommandSession.claudeEnvironment(
+            [
+                "HOME": "/Users/tester",
+                "PATH": "/usr/bin:/bin",
+                "PWD": "/Users/tester/Documents/private-project",
+                "OLDPWD": "/Users/tester/Documents",
+                "ANTHROPIC_API_KEY": "must-not-leak",
+            ],
+            workingDirectory: probeDirectory)
+
+        try expect(
+            environment["PWD"] == probeDirectory.path,
+            "expected Claude PWD to match its probe directory")
+        try expect(environment["OLDPWD"] == nil, "expected Claude OLDPWD to be removed")
+        try expect(environment["ANTHROPIC_API_KEY"] == nil, "expected Anthropic secrets to be removed")
+    }
+
     private static func testDurationLabelsAndCodexWindowClassification() throws {
         try expect(RateWindow.durationLabel(minutes: 300) == "5h", "expected 300 minutes to display as 5h")
         try expect(RateWindow.durationLabel(minutes: 10_080) == "7d", "expected 10080 minutes to display as 7d")
@@ -223,11 +301,59 @@ enum SelfTest {
         try expect(DisplayFormatter.compactTokens(activity.peakDailyTokens) == "1.95B", "expected 1.95B")
         try expect(DisplayFormatter.compactTokens(6_559_374_729) == "6.56B", "expected three significant figures")
         try expect(DisplayFormatter.compactTokens(637_697_578) == "638M", "expected rounded megatokens")
+        try expect(DisplayFormatter.compactAxisTokens(900_000_000) == "0.9B", "expected promoted billion axis label")
+        try expect(DisplayFormatter.compactAxisTokens(900_000) == "0.9M", "expected promoted million axis label")
+        try expect(DisplayFormatter.compactAxisTokens(900) == "0.9K", "expected promoted thousand axis label")
+        try expect(DisplayFormatter.compactAxisTokens(90_000_000) == "90M", "expected ordinary million axis label")
         try expect(
             DisplayFormatter.duration(seconds: activity.longestRunningTurnSec) == "13h 17m",
             "expected 13h 17m")
-        try expect(DisplayFormatter.roundedAxisMaximum(6_559_374_729) == 10_000_000_000, "expected 10B axis")
-        try expect(DisplayFormatter.roundedAxisMaximum(24_670_581_944) == 25_000_000_000, "expected 25B axis")
+    }
+
+    private static func testPreferredAxisMaximums() throws {
+        try expect(DisplayFormatter.roundedAxisMaximum(1_100_000) == 1_500_000, "expected 1.5M axis")
+        try expect(DisplayFormatter.roundedAxisMaximum(2_100_000) == 2_500_000, "expected 2.5M axis")
+        try expect(DisplayFormatter.roundedAxisMaximum(5_300_000) == 6_000_000, "expected 6M axis")
+        try expect(DisplayFormatter.roundedAxisMaximum(6_400_000) == 8_000_000, "expected 8M axis")
+        try expect(DisplayFormatter.roundedAxisMaximum(8_000_000) == 10_000_000, "expected 10M axis")
+        try expect(DisplayFormatter.roundedAxisMaximum(9_900_000) == 10_000_000, "expected capped 10M axis")
+        try expect(DisplayFormatter.roundedAxisMaximum(24_670_581_944) == 30_000_000_000, "expected 30B axis")
+    }
+
+    private static func testMenuProviderSelectionFollowsSingleTrackedProvider() throws {
+        try expect(
+            MenuProviderSelection.combined.constrained(to: [.codex]) == .codex,
+            "expected Both to become Codex when only Codex is tracked")
+        try expect(
+            MenuProviderSelection.combined.constrained(to: [.claude]) == .claude,
+            "expected Both to become Claude when only Claude is tracked")
+        try expect(
+            MenuProviderSelection.combined.constrained(to: [.codex, .claude]) == .combined,
+            "expected Both to remain available when both providers are tracked")
+    }
+
+    private static func testWeeklyActivityUsesMondayThroughSundayBuckets() throws {
+        let days = [
+            TokenUsageDay(startDate: "2026-07-19", tokens: 10),
+            TokenUsageDay(startDate: "2026-07-20", tokens: 20),
+            TokenUsageDay(startDate: "2026-07-21", tokens: 30),
+        ]
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let buckets = TokenWeekBucket.calendarWeeks(
+            from: days,
+            calendar: calendar,
+            minimumCount: 1)
+
+        try expect(buckets.count == 2, "expected two calendar-week buckets")
+        try expect(buckets[0].tokens == 10, "expected Sunday in the prior week")
+        try expect(buckets[1].tokens == 50, "expected Monday and Tuesday in the current week")
+        try expect(
+            calendar.component(.weekday, from: buckets[1].startDate) == 2,
+            "expected the current bucket to start Monday")
+        try expect(
+            calendar.component(.weekday, from: buckets[1].endDate) == 3,
+            "expected the partial current bucket to end Tuesday")
     }
 
     private static func testPartialDualLimitFormatting() throws {
@@ -311,6 +437,8 @@ enum SelfTest {
 
     private static func testMenuBarStatusImagesRenderVisiblePixels() throws {
         let window = RateWindow(usedPercent: 25, windowMinutes: 300, resetsAt: nil, resetDescription: nil)
+        try expect(MenuProviderSelection.combined.label == "Both", "expected Both provider label")
+        try expect(MenuProviderSelection.claude.label == "Claude", "expected compact Claude provider label")
         for selection in MenuProviderSelection.allCases {
             let image = MenuBarStatusImageRenderer.image(
                 selection: selection,
@@ -337,6 +465,32 @@ enum SelfTest {
             nestedImage.size.height >= 18 && nestedImage.size.height <= 20,
             "expected compact nested status image height")
         try expect(Self.visiblePixelCount(in: nestedImage) > 8, "expected visible pixels for nested status image")
+
+        let sideBySideImage = MenuBarStatusImageRenderer.image(
+            selection: .combined,
+            metric: .fiveHourPercent,
+            displayMode: .ringAndPercentage,
+            window: window,
+            percentText: "75%",
+            amountText: nil,
+            sideBySideEntries: [
+                MenuBarStatusEntry(
+                    window: window,
+                    innerWindow: nil,
+                    percentText: "75%",
+                    amountText: nil),
+                MenuBarStatusEntry(
+                    window: RateWindow(
+                        usedPercent: 40,
+                        windowMinutes: 300,
+                        resetsAt: nil,
+                        resetDescription: nil),
+                    innerWindow: nil,
+                    percentText: "60%",
+                    amountText: nil),
+            ])
+        try expect(sideBySideImage.size.width > 80, "expected two side-by-side provider indicators")
+        try expect(Self.visiblePixelCount(in: sideBySideImage) > 16, "expected visible pixels for both providers")
 
         let percentImage = MenuBarStatusImageRenderer.image(
             selection: .codex,
