@@ -81,5 +81,5 @@ jobs:
             --verify-tag \
             --generate-notes \
             --notes "> [!WARNING]
-            > This build is ad-hoc signed, not Apple Developer ID-signed or notarized. macOS will require explicit approval before the first launch. See the README installation instructions." \
+            > This build is ad-hoc signed, not Apple Developer ID-signed or notarized. After attempting the first launch, open System Settings → Privacy & Security, find AgentUsage under Security, and click Open Anyway." \
             --title "AgentUsage $GITHUB_REF_NAME"
