@@ -17,19 +17,14 @@ enum SelfTest {
         try testMenuTitleShowsSelectedCodexCredits()
         try testMenuTitleShowsCombinedClaudeBillingDollars()
         try testMenuTitleFallsBackToDollarsWhenWindowMissing()
-        try testClaudeUsageParserReadsSessionAndWeeklyPercentLeft()
         try testClaudeOAuthUsageParserReadsWindows()
         try testClaudeOAuthCredentialParserReadsClaudeCodeShape()
-        try testClaudeUsageParserReadsCompressedResetDates()
-        try testClaudeUsageParserReadsLocalTotalCost()
-        try testClaudeProbeEnvironmentDoesNotLeakCallingDirectory()
         try testDurationLabelsAndCodexWindowClassification()
         try testCodexAccountUsageParsingAndFormatting()
         try testPreferredAxisMaximums()
         try testMenuProviderSelectionFollowsSingleTrackedProvider()
         try testWeeklyActivityUsesMondayThroughSundayBuckets()
         try testPartialDualLimitFormatting()
-        try testCostScannerOnlyCountsCurrentBillingPeriodExplicitCosts()
         try testResetCreditSummaryAndExpirationHelp()
         try testMenuBarStatusImagesRenderVisiblePixels()
     }
@@ -134,50 +129,6 @@ enum SelfTest {
         try expect(title == "Claude Code $12.34", "expected Claude dollar fallback, got \(title)")
     }
 
-    private static func testClaudeUsageParserReadsSessionAndWeeklyPercentLeft() throws {
-        let output = """
-        Settings: Usage
-
-        Current session
-        72% left
-        Resets at 4:00PM (America/Los_Angeles)
-
-        Current week (all models)
-        38% remaining
-        Resets Jun 10 at 9:00AM (America/Los_Angeles)
-        """
-
-        let parsed = try ClaudeUsageParser.parse(
-            usageText: output,
-            statusText: "Account: person@example.com\nClaude Max")
-
-        try expect(parsed.fiveHour?.usedPercent == 28, "expected 28% used for Claude 5h")
-        try expect(parsed.sevenDay?.usedPercent == 62, "expected 62% used for Claude 7d")
-        try expect(parsed.accountEmail == "person@example.com", "expected Claude email")
-        try expect(parsed.plan == "Claude Max", "expected Claude plan")
-        try expect(parsed.fiveHour?.windowMinutes == 300, "expected 5h window")
-        try expect(parsed.sevenDay?.windowMinutes == 10_080, "expected 7d window")
-    }
-
-    private static func testClaudeUsageParserReadsLocalTotalCost() throws {
-        let output = """
-        Settings Status Config Usage Stats
-
-        Session
-        Total cost: $7.89
-        Total duration (API): 1m
-        What's contributing to your limits usage?
-        Approximate, based on local sessions on this machine
-        """
-
-        let parsed = try ClaudeUsageParser.parse(usageText: output)
-
-        try expect(parsed.fiveHour == nil, "expected no Claude 5h window")
-        try expect(parsed.sevenDay == nil, "expected no Claude 7d window")
-        try expect(parsed.localUsageDollars == 7.89, "expected Claude local cost")
-        try expect(parsed.plan == "Claude local usage", "expected local usage plan marker")
-    }
-
     private static func testClaudeOAuthUsageParserReadsWindows() throws {
         let data = Data(#"{"five_hour":{"utilization":28.5,"resets_at":"2026-07-21T21:20:00Z"},"seven_day":{"utilization":62,"resets_at":"2026-07-28T18:00:00Z"},"extra_usage":{"is_enabled":true,"monthly_limit":10000,"used_credits":3750,"utilization":37.5,"currency":"USD"}}"#.utf8)
         let updatedAt = Date(timeIntervalSince1970: 1_700_000_000)
@@ -207,46 +158,6 @@ enum SelfTest {
         try expect(
             credentials?.expiresAt == Date(timeIntervalSince1970: 1_800_000_000),
             "expected millisecond OAuth expiration")
-    }
-
-    private static func testClaudeUsageParserReadsCompressedResetDates() throws {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
-        let now = calendar.date(from: DateComponents(year: 2026, month: 7, day: 21, hour: 16))!
-        let session = ClaudeUsageParser.parseResetDate(
-            "Resets9:20pm(America/Los_Angeles)",
-            now: now)
-        let weekly = ClaudeUsageParser.parseResetDate(
-            "ResetsJul28at11am(America/Los_Angeles)",
-            now: now)
-
-        try expect(session != nil, "expected compressed Claude session reset to parse")
-        try expect(weekly != nil, "expected compressed Claude weekly reset to parse")
-        try expect(
-            session.map(DisplayFormatter.rateLimitResetDate) == "09:20 PM, Jul 21",
-            "expected canonical Claude session reset label")
-        try expect(
-            weekly.map(DisplayFormatter.rateLimitResetDate) == "11:00 AM, Jul 28",
-            "expected canonical Claude weekly reset label")
-    }
-
-    private static func testClaudeProbeEnvironmentDoesNotLeakCallingDirectory() throws {
-        let probeDirectory = URL(fileURLWithPath: "/tmp/AgentUsage-ClaudeProbe", isDirectory: true)
-        let environment = PTYCommandSession.claudeEnvironment(
-            [
-                "HOME": "/Users/tester",
-                "PATH": "/usr/bin:/bin",
-                "PWD": "/Users/tester/Documents/private-project",
-                "OLDPWD": "/Users/tester/Documents",
-                "ANTHROPIC_API_KEY": "must-not-leak",
-            ],
-            workingDirectory: probeDirectory)
-
-        try expect(
-            environment["PWD"] == probeDirectory.path,
-            "expected Claude PWD to match its probe directory")
-        try expect(environment["OLDPWD"] == nil, "expected Claude OLDPWD to be removed")
-        try expect(environment["ANTHROPIC_API_KEY"] == nil, "expected Anthropic secrets to be removed")
     }
 
     private static func testDurationLabelsAndCodexWindowClassification() throws {
@@ -368,32 +279,6 @@ enum SelfTest {
             metric: .bothPercent,
             showUsed: false)
         try expect(text == "7d: 97%", "expected weekly-only dual text, got \(text ?? "nil")")
-    }
-
-    private static func testCostScannerOnlyCountsCurrentBillingPeriodExplicitCosts() throws {
-        let temp = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let sessions = temp.appendingPathComponent(".codex/sessions", isDirectory: true)
-        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: temp) }
-
-        let file = sessions.appendingPathComponent("usage.jsonl")
-        let body = """
-        {"timestamp":"2026-05-31T23:59:00Z","cost_usd":99}
-        {"timestamp":"2026-06-01T08:01:00Z","cost_usd":1.25}
-        {"timestamp":"2026-06-08T12:00:00Z","usage":{"total_cost_usd":2.50}}
-        """
-        try body.write(to: file, atomically: true, encoding: .utf8)
-
-        let scanner = CostUsageScanner(
-            provider: .codex,
-            environment: ["HOME": temp.path],
-            now: ISO8601DateFormatter().date(from: "2026-06-08T19:00:00Z")!)
-
-        let scanned = try scanner.scanCurrentBillingPeriod()
-
-        try expect(abs(scanned.dollars - 3.75) < 0.0001, "expected $3.75, got \(scanned.dollars)")
-        try expect(scanned.scannedFiles == 1, "expected one scanned file")
     }
 
     private static func testResetCreditSummaryAndExpirationHelp() throws {

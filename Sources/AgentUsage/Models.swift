@@ -577,12 +577,3 @@ enum DisplayFormatter {
         return Self.percent(percent)
     }
 }
-
-enum TextParsing {
-    static func stripANSICodes(_ text: String) -> String {
-        let pattern = "\u{001B}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])"
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "")
-    }
-}
