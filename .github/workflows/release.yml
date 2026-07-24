@@ -49,9 +49,21 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           ditto -c -k --keepParent .build/release/AgentUsage.app dist/AgentUsage-macos-universal.zip
+          dmg_root="$RUNNER_TEMP/AgentUsage-dmg"
+          mkdir -p "$dmg_root"
+          ditto .build/release/AgentUsage.app "$dmg_root/AgentUsage.app"
+          ln -s /Applications "$dmg_root/Applications"
+          hdiutil create \
+            -volname AgentUsage \
+            -srcfolder "$dmg_root" \
+            -ov \
+            -format UDZO \
+            dist/AgentUsage-macos-universal.dmg
+          hdiutil verify dist/AgentUsage-macos-universal.dmg
           (
             cd dist
             shasum -a 256 AgentUsage-macos-universal.zip > AgentUsage-macos-universal.zip.sha256
+            shasum -a 256 AgentUsage-macos-universal.dmg > AgentUsage-macos-universal.dmg.sha256
           )
           cp Scripts/install.sh dist/install.sh
 
@@ -63,6 +75,8 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             dist/AgentUsage-macos-universal.zip \
             dist/AgentUsage-macos-universal.zip.sha256 \
+            dist/AgentUsage-macos-universal.dmg \
+            dist/AgentUsage-macos-universal.dmg.sha256 \
             dist/install.sh \
             --verify-tag \
             --generate-notes \
