@@ -21,24 +21,6 @@ jobs:
           plist_version="$(sed -n '/CFBundleShortVersionString/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' Scripts/build-app.sh)"
           test "${GITHUB_REF_NAME#v}" = "$plist_version"
 
-      - name: Import Developer ID certificate
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          certificate="$RUNNER_TEMP/developer-id.p12"
-          keychain="$RUNNER_TEMP/AgentUsage-signing.keychain-db"
-          keychain_password="$(uuidgen)"
-          printf '%s' "$CERTIFICATE_BASE64" | base64 -D > "$certificate"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          security import "$certificate" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
-          security list-keychain -d user -s "$keychain"
-          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain"
-
       - name: Build universal app
         shell: bash
         run: |
@@ -52,29 +34,14 @@ jobs:
             -output .build/universal/AgentUsage
           AGENTUSAGE_EXECUTABLE="$PWD/.build/universal/AgentUsage" ./Scripts/build-app.sh
 
-      - name: Sign and notarize
-        env:
-          SIGNING_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      - name: Ad-hoc sign
         shell: bash
         run: |
           set -euo pipefail
           app=".build/release/AgentUsage.app"
-          submission="$RUNNER_TEMP/AgentUsage-notarization.zip"
-          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app/Contents/MacOS/AgentUsage"
-          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app"
+          codesign --force --options runtime --sign - "$app/Contents/MacOS/AgentUsage"
+          codesign --force --options runtime --sign - "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
-          ditto -c -k --keepParent "$app" "$submission"
-          xcrun notarytool submit "$submission" \
-            --apple-id "$APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --wait
-          xcrun stapler staple "$app"
-          xcrun stapler validate "$app"
-          spctl --assess --type execute --verbose=2 "$app"
 
       - name: Package release
         shell: bash
@@ -99,11 +66,6 @@ jobs:
             dist/install.sh \
             --verify-tag \
             --generate-notes \
+            --notes "> [!WARNING]
+            > This build is ad-hoc signed, not Apple Developer ID-signed or notarized. macOS will require explicit approval before the first launch. See the README installation instructions." \
             --title "AgentUsage $GITHUB_REF_NAME"
-
-      - name: Remove signing credentials
-        if: always()
-        shell: bash
-        run: |
-          security delete-keychain "$RUNNER_TEMP/AgentUsage-signing.keychain-db" 2>/dev/null || true
-          rm -f "$RUNNER_TEMP/developer-id.p12"
