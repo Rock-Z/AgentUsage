@@ -314,7 +314,7 @@ private struct CodexResetExpirationFetcher {
         request.setValue("Bearer \(auth.tokens.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(auth.tokens.accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("aiusage", forHTTPHeaderField: "User-Agent")
+        request.setValue("AgentUsage", forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -467,7 +467,7 @@ private final class CodexRPCClient: @unchecked Sendable {
 
     private static func probeDirectory() -> URL {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("aiusage-CodexProbe", isDirectory: true)
+            .appendingPathComponent("AgentUsage-CodexProbe", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
@@ -1230,7 +1230,7 @@ actor PTYCommandSession {
 
     private static func probeDirectory() -> URL {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("aiusage-ClaudeProbe", isDirectory: true)
+            .appendingPathComponent("AgentUsage-ClaudeProbe", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }

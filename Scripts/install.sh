@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="aiusage"
-REPOSITORY="${AIUSAGE_REPO:-Rock-Z/aiusage}"
-VERSION="${AIUSAGE_VERSION:-latest}"
-INSTALL_DIR="${AIUSAGE_INSTALL_DIR:-$HOME/Applications}"
-ARCHIVE_NAME="aiusage-macos-universal.zip"
+APP_NAME="AgentUsage"
+REPOSITORY="${AGENTUSAGE_REPO:-Rock-Z/AgentUsage}"
+VERSION="${AGENTUSAGE_VERSION:-latest}"
+INSTALL_DIR="${AGENTUSAGE_INSTALL_DIR:-$HOME/Applications}"
+ARCHIVE_NAME="AgentUsage-macos-universal.zip"
 
 if [[ ! "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
   echo "Invalid GitHub repository: $REPOSITORY" >&2
@@ -19,21 +19,21 @@ for command in curl ditto shasum codesign spctl; do
   fi
 done
 
-if [[ -n "${AIUSAGE_RELEASE_BASE_URL:-}" ]]; then
-  RELEASE_URL="${AIUSAGE_RELEASE_BASE_URL%/}"
+if [[ -n "${AGENTUSAGE_RELEASE_BASE_URL:-}" ]]; then
+  RELEASE_URL="${AGENTUSAGE_RELEASE_BASE_URL%/}"
 elif [[ "$VERSION" == "latest" ]]; then
   RELEASE_URL="https://github.com/$REPOSITORY/releases/latest/download"
 else
   RELEASE_URL="https://github.com/$REPOSITORY/releases/download/$VERSION"
 fi
 
-TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aiusage-install.XXXXXX")"
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/AgentUsage-install.XXXXXX")"
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
 ARCHIVE_PATH="$TEMP_DIR/$ARCHIVE_NAME"
 CHECKSUM_PATH="$ARCHIVE_PATH.sha256"
 
-echo "Downloading aiusage ${VERSION}…"
+echo "Downloading AgentUsage ${VERSION}…"
 curl --fail --location --silent --show-error --retry 3 \
   "$RELEASE_URL/$ARCHIVE_NAME" --output "$ARCHIVE_PATH"
 curl --fail --location --silent --show-error --retry 3 \
@@ -54,7 +54,7 @@ if [[ ! -d "$SOURCE_APP" ]]; then
   exit 1
 fi
 codesign --verify --deep --strict --verbose=2 "$SOURCE_APP"
-if [[ "${AIUSAGE_ALLOW_UNNOTARIZED:-0}" != "1" ]]; then
+if [[ "${AGENTUSAGE_ALLOW_UNNOTARIZED:-0}" != "1" ]]; then
   spctl --assess --type execute --verbose=2 "$SOURCE_APP"
 fi
 
@@ -78,6 +78,6 @@ fi
 rm -rf "$BACKUP_APP"
 
 echo "Installed $TARGET_APP"
-if [[ "${AIUSAGE_SKIP_LAUNCH:-0}" != "1" ]]; then
+if [[ "${AGENTUSAGE_SKIP_LAUNCH:-0}" != "1" ]]; then
   open "$TARGET_APP"
 fi

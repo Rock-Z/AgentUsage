@@ -29,7 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           certificate="$RUNNER_TEMP/developer-id.p12"
-          keychain="$RUNNER_TEMP/aiusage-signing.keychain-db"
+          keychain="$RUNNER_TEMP/AgentUsage-signing.keychain-db"
           keychain_password="$(uuidgen)"
           printf '%s' "$CERTIFICATE_BASE64" | base64 -D > "$certificate"
           security create-keychain -p "$keychain_password" "$keychain"
@@ -47,10 +47,10 @@ jobs:
           swift build -c release --triple x86_64-apple-macosx14.0 --scratch-path .build/x86_64
           mkdir -p .build/universal
           lipo -create \
-            .build/arm64/arm64-apple-macosx/release/aiusage \
-            .build/x86_64/x86_64-apple-macosx/release/aiusage \
-            -output .build/universal/aiusage
-          AIUSAGE_EXECUTABLE="$PWD/.build/universal/aiusage" ./Scripts/build-app.sh
+            .build/arm64/arm64-apple-macosx/release/AgentUsage \
+            .build/x86_64/x86_64-apple-macosx/release/AgentUsage \
+            -output .build/universal/AgentUsage
+          AGENTUSAGE_EXECUTABLE="$PWD/.build/universal/AgentUsage" ./Scripts/build-app.sh
 
       - name: Sign and notarize
         env:
@@ -61,9 +61,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app=".build/release/aiusage.app"
-          submission="$RUNNER_TEMP/aiusage-notarization.zip"
-          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app/Contents/MacOS/aiusage"
+          app=".build/release/AgentUsage.app"
+          submission="$RUNNER_TEMP/AgentUsage-notarization.zip"
+          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app/Contents/MacOS/AgentUsage"
           codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$app"
           codesign --verify --deep --strict --verbose=2 "$app"
           ditto -c -k --keepParent "$app" "$submission"
@@ -81,10 +81,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          ditto -c -k --keepParent .build/release/aiusage.app dist/aiusage-macos-universal.zip
+          ditto -c -k --keepParent .build/release/AgentUsage.app dist/AgentUsage-macos-universal.zip
           (
             cd dist
-            shasum -a 256 aiusage-macos-universal.zip > aiusage-macos-universal.zip.sha256
+            shasum -a 256 AgentUsage-macos-universal.zip > AgentUsage-macos-universal.zip.sha256
           )
           cp Scripts/install.sh dist/install.sh
 
@@ -94,16 +94,16 @@ jobs:
         shell: bash
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            dist/aiusage-macos-universal.zip \
-            dist/aiusage-macos-universal.zip.sha256 \
+            dist/AgentUsage-macos-universal.zip \
+            dist/AgentUsage-macos-universal.zip.sha256 \
             dist/install.sh \
             --verify-tag \
             --generate-notes \
-            --title "aiusage $GITHUB_REF_NAME"
+            --title "AgentUsage $GITHUB_REF_NAME"
 
       - name: Remove signing credentials
         if: always()
         shell: bash
         run: |
-          security delete-keychain "$RUNNER_TEMP/aiusage-signing.keychain-db" 2>/dev/null || true
+          security delete-keychain "$RUNNER_TEMP/AgentUsage-signing.keychain-db" 2>/dev/null || true
           rm -f "$RUNNER_TEMP/developer-id.p12"

@@ -231,7 +231,7 @@ enum SelfTest {
     }
 
     private static func testClaudeProbeEnvironmentDoesNotLeakCallingDirectory() throws {
-        let probeDirectory = URL(fileURLWithPath: "/tmp/aiusage-ClaudeProbe", isDirectory: true)
+        let probeDirectory = URL(fileURLWithPath: "/tmp/AgentUsage-ClaudeProbe", isDirectory: true)
         let environment = PTYCommandSession.claudeEnvironment(
             [
                 "HOME": "/Users/tester",

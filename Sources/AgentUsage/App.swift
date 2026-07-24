@@ -3,38 +3,10 @@ import AppKit
 import SwiftUI
 
 @main
-struct AIUsageApp: App {
+struct AgentUsageApp: App {
     @StateObject private var store = UsageStore()
 
     init() {
-        if let optionIndex = CommandLine.arguments.firstIndex(of: "--render-status-snapshot"),
-           CommandLine.arguments.indices.contains(optionIndex + 1)
-        {
-            do {
-                try MenuBarStatusSnapshotCommand.run(
-                    path: CommandLine.arguments[optionIndex + 1])
-                Foundation.exit(0)
-            } catch {
-                fputs("Status snapshot render failed: \(error)\n", stderr)
-                Foundation.exit(1)
-            }
-        }
-        if let optionIndex = CommandLine.arguments.firstIndex(of: "--render-snapshot"),
-           CommandLine.arguments.indices.contains(optionIndex + 1)
-        {
-            do {
-                let period = CommandLine.arguments.indices.contains(optionIndex + 2)
-                    ? CodexActivityPeriod(rawValue: CommandLine.arguments[optionIndex + 2])
-                    : nil
-                try RenderSnapshotCommand.run(
-                    path: CommandLine.arguments[optionIndex + 1],
-                    period: period)
-                Foundation.exit(0)
-            } catch {
-                fputs("Snapshot render failed: \(error)\n", stderr)
-                Foundation.exit(1)
-            }
-        }
         if CommandLine.arguments.contains("--self-test") {
             do {
                 try SelfTest.run()
@@ -79,8 +51,6 @@ final class UsageStore: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var timerTask: Task<Void, Never>?
     private let fetchers: [Provider: any UsageFetching]
-    var renderingTrackedProviders: Set<Provider>?
-    var renderingRefreshSeconds: Int?
 
     var menuMetric: MenuMetric {
         get { MenuMetric(rawValue: menuMetricRaw) ?? .fiveHourPercent }
@@ -165,12 +135,11 @@ final class UsageStore: ObservableObject {
         Provider.allCases.filter { isTracking($0) }
     }
 
-    init(fetchers: [Provider: any UsageFetching]? = nil, startImmediately: Bool = true) {
+    init(fetchers: [Provider: any UsageFetching]? = nil) {
         self.fetchers = fetchers ?? [
             .codex: CodexUsageFetcher(),
             .claude: ClaudeUsageFetcher(),
         ]
-        guard startImmediately else { return }
         start()
     }
 
@@ -213,14 +182,7 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    func refreshForSnapshot() async {
-        await refresh(providers: trackedProviders)
-    }
-
     func isTracking(_ provider: Provider) -> Bool {
-        if let renderingTrackedProviders {
-            return renderingTrackedProviders.contains(provider)
-        }
         return switch provider {
         case .codex: trackCodex
         case .claude: trackClaude
@@ -288,307 +250,8 @@ final class UsageStore: ObservableObject {
     }
 }
 
-@MainActor
-private enum RenderSnapshotCommand {
-    enum RenderError: LocalizedError {
-        case bitmapCreationFailed
-        case pngCreationFailed
-
-        var errorDescription: String? {
-            switch self {
-            case .bitmapCreationFailed: "Could not create a bitmap for the rendered menu."
-            case .pngCreationFailed: "Could not encode the rendered menu as PNG."
-            }
-        }
-    }
-
-    static func run(path: String, period: CodexActivityPeriod?) throws {
-        let store = UsageStore(startImmediately: false)
-        var finished = false
-        var renderResult: Result<Void, Error>?
-
-        Task { @MainActor in
-            if ProcessInfo.processInfo.environment["AIUSAGE_SNAPSHOT_DATA"] == "mock" {
-                configureMockData(store)
-            } else {
-                await store.refreshForSnapshot()
-            }
-            do {
-                try render(store: store, path: path, period: period)
-                renderResult = .success(())
-            } catch {
-                renderResult = .failure(error)
-            }
-            finished = true
-        }
-
-        while !finished {
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
-        }
-        try renderResult?.get()
-    }
-
-    private static func render(
-        store: UsageStore,
-        path: String,
-        period: CodexActivityPeriod?) throws
-    {
-        let snapshotAppearance = ProcessInfo.processInfo.environment["AIUSAGE_SNAPSHOT_APPEARANCE"]
-        let colorScheme: ColorScheme = switch snapshotAppearance {
-        case "dark": .dark
-        case "light": .light
-        default: .light
-        }
-        let backdrop = ProcessInfo.processInfo.environment["AIUSAGE_SNAPSHOT_BACKDROP"] ?? "plain"
-        let rootView = MenuContentView(store: store, initialActivityPeriod: period ?? .daily)
-            .frame(width: 360)
-            .background {
-                SnapshotBackdrop(kind: backdrop, colorScheme: colorScheme)
-            }
-            .environment(\.colorScheme, colorScheme)
-        let hostingView = NSHostingView(rootView: rootView)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 360, height: 1_200)
-        hostingView.layoutSubtreeIfNeeded()
-
-        let fittingHeight = ceil(hostingView.fittingSize.height)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 360, height: fittingHeight)
-        hostingView.layoutSubtreeIfNeeded()
-        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
-        hostingView.layoutSubtreeIfNeeded()
-
-        guard let bitmap = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds) else {
-            throw RenderError.bitmapCreationFailed
-        }
-        hostingView.cacheDisplay(in: hostingView.bounds, to: bitmap)
-        guard let png = bitmap.representation(using: .png, properties: [:]) else {
-            throw RenderError.pngCreationFailed
-        }
-        try png.write(to: URL(fileURLWithPath: path), options: .atomic)
-    }
-
-    private static func configureMockData(_ store: UsageStore) {
-        let now = Date()
-        let activity = mockActivity(now: now)
-        store.renderingTrackedProviders = Set(Provider.allCases)
-        if let rawRefresh = ProcessInfo.processInfo.environment["AIUSAGE_SNAPSHOT_REFRESH_SECONDS"],
-           let refreshSeconds = Int(rawRefresh)
-        {
-            store.renderingRefreshSeconds = refreshSeconds
-        }
-        store.states = [
-            .codex: ProviderState(snapshot: UsageSnapshot(
-                provider: .codex,
-                fiveHour: RateWindow(
-                    usedPercent: 24,
-                    windowMinutes: 300,
-                    resetsAt: now.addingTimeInterval(2.4 * 3_600),
-                    resetDescription: nil),
-                sevenDay: RateWindow(
-                    usedPercent: 47,
-                    windowMinutes: 10_080,
-                    resetsAt: now.addingTimeInterval(4.2 * 86_400),
-                    resetDescription: nil),
-                credits: nil,
-                resetCredits: ResetCreditSnapshot(availableCount: 4, credits: []),
-                billingCost: nil,
-                localUsageCost: nil,
-                accountEmail: nil,
-                plan: "pro",
-                codexActivity: activity,
-                source: "mock",
-                updatedAt: now)),
-            .claude: ProviderState(snapshot: UsageSnapshot(
-                provider: .claude,
-                fiveHour: RateWindow(
-                    usedPercent: 31,
-                    windowMinutes: 300,
-                    resetsAt: now.addingTimeInterval(1.3 * 3_600),
-                    resetDescription: nil),
-                sevenDay: RateWindow(
-                    usedPercent: 58,
-                    windowMinutes: 10_080,
-                    resetsAt: now.addingTimeInterval(2.7 * 86_400),
-                    resetDescription: nil),
-                credits: CreditSnapshot(
-                    balance: 68.25,
-                    hasCredits: true,
-                    unlimited: false,
-                    currencyCode: "USD"),
-                billingCost: nil,
-                localUsageCost: nil,
-                accountEmail: nil,
-                plan: "Claude Pro",
-                source: "mock",
-                updatedAt: now)),
-        ]
-    }
-
-    private static func mockActivity(now: Date) -> CodexActivitySnapshot {
-        let calendar = Calendar.current
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        let days = (0..<182).compactMap { offset -> TokenUsageDay? in
-            guard let date = calendar.date(byAdding: .day, value: offset - 181, to: now) else {
-                return nil
-            }
-            let wave = Int64((offset * 37) % 11 + 1)
-            let burst = offset.isMultiple(of: 17) ? Int64(420_000_000) : 0
-            return TokenUsageDay(
-                startDate: formatter.string(from: date),
-                tokens: wave * 34_000_000 + burst)
-        }
-        return CodexActivitySnapshot(
-            lifetimeTokens: days.reduce(0) { $0 + $1.tokens },
-            peakDailyTokens: days.map(\.tokens).max(),
-            longestRunningTurnSec: 47_828,
-            currentStreakDays: 16,
-            longestStreakDays: 38,
-            dailyUsage: days)
-    }
-}
-
-private enum MenuBarStatusSnapshotCommand {
-    enum RenderError: LocalizedError {
-        case pngCreationFailed
-
-        var errorDescription: String? { "Could not encode the status snapshot." }
-    }
-
-    static func run(path: String) throws {
-        guard let appearance = NSAppearance(named: .darkAqua) else {
-            throw RenderError.pngCreationFailed
-        }
-        var renderFailure: Error?
-        appearance.performAsCurrentDrawingAppearance {
-            do {
-                try render(path: path)
-            } catch {
-                renderFailure = error
-            }
-        }
-        if let renderFailure { throw renderFailure }
-    }
-
-    private static func render(path: String) throws {
-        let weekly = RateWindow(
-            usedPercent: 9,
-            windowMinutes: 10_080,
-            resetsAt: nil,
-            resetDescription: nil)
-        let full = RateWindow(
-            usedPercent: 0,
-            windowMinutes: 300,
-            resetsAt: nil,
-            resetDescription: nil)
-        let status = MenuBarStatusImageRenderer.image(
-            selection: .combined,
-            metric: .bothPercent,
-            displayMode: .ringAndPercentage,
-            window: nil,
-            innerWindow: weekly,
-            percentText: "7d: 91%",
-            amountText: nil,
-            sideBySideEntries: [
-                MenuBarStatusEntry(
-                    window: nil,
-                    innerWindow: weekly,
-                    percentText: "7d: 91%",
-                    amountText: nil),
-                MenuBarStatusEntry(
-                    window: full,
-                    innerWindow: RateWindow(
-                        usedPercent: 0,
-                        windowMinutes: 10_080,
-                        resetsAt: nil,
-                        resetDescription: nil),
-                    percentText: "5h: 100%\n7d: 100%",
-                    amountText: nil),
-            ])
-        let scale: CGFloat = 2
-        let padding = CGSize(width: 8, height: 5)
-        let size = NSSize(
-            width: (status.size.width + padding.width * 2) * scale,
-            height: (max(status.size.height, 18) + padding.height * 2) * scale)
-        let canvas = NSImage(size: size, flipped: false) { rect in
-            NSColor.black.setFill()
-            rect.fill()
-            status.draw(in: NSRect(
-                x: padding.width * scale,
-                y: padding.height * scale,
-                width: status.size.width * scale,
-                height: status.size.height * scale))
-            return true
-        }
-        guard let tiff = canvas.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff),
-              let png = bitmap.representation(using: .png, properties: [:])
-        else { throw RenderError.pngCreationFailed }
-        try png.write(to: URL(fileURLWithPath: path), options: .atomic)
-    }
-}
-
-private struct SnapshotBackdrop: View {
-    var kind: String
-    var colorScheme: ColorScheme
-
-    var body: some View {
-        ZStack {
-            base
-            if kind != "plain" {
-                Circle()
-                    .fill(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.42))
-                    .frame(width: 260, height: 260)
-                    .blur(radius: 18)
-                    .offset(x: -130, y: -220)
-                Circle()
-                    .fill(Color.blue.opacity(colorScheme == .dark ? 0.24 : 0.20))
-                    .frame(width: 300, height: 300)
-                    .blur(radius: 24)
-                    .offset(x: 150, y: 260)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var base: some View {
-        switch kind {
-        case "warm":
-            LinearGradient(
-                colors: [
-                    Color(red: 0.96, green: 0.74, blue: 0.54),
-                    Color(red: 0.66, green: 0.82, blue: 0.88),
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing)
-        case "dark":
-            LinearGradient(
-                colors: [
-                    Color(red: 0.08, green: 0.10, blue: 0.18),
-                    Color(red: 0.22, green: 0.12, blue: 0.28),
-                    Color(red: 0.05, green: 0.25, blue: 0.28),
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing)
-        case "mixed":
-            LinearGradient(
-                colors: [
-                    Color(red: 0.88, green: 0.42, blue: 0.32),
-                    Color(red: 0.30, green: 0.22, blue: 0.54),
-                    Color(red: 0.18, green: 0.62, blue: 0.60),
-                ],
-                startPoint: .top,
-                endPoint: .bottom)
-        default:
-            colorScheme == .dark ? Color.black : Color.white
-        }
-    }
-}
-
 struct MenuContentView: View {
     @ObservedObject var store: UsageStore
-    var initialActivityPeriod: CodexActivityPeriod = .daily
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
@@ -639,7 +302,7 @@ struct MenuContentView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Text("Agent Usage")
+            Text("AgentUsage")
                 .font(.headline)
             Spacer()
             Button {
@@ -666,7 +329,7 @@ struct MenuContentView: View {
             if provider == .codex,
                let activity = store.states[.codex]?.snapshot?.codexActivity
             {
-                CodexActivityView(activity: activity, initialPeriod: initialActivityPeriod)
+                CodexActivityView(activity: activity)
             }
         }
     }
@@ -781,18 +444,14 @@ struct MenuContentView: View {
     }
 
     private var effectiveRefreshSeconds: Int {
-        store.renderingRefreshSeconds ?? store.refreshSeconds
+        store.refreshSeconds
     }
 
     private func setRefreshInterval(index: Int) {
         let boundedIndex = min(max(index, 0), Self.refreshIntervals.count - 1)
         let seconds = Self.refreshIntervals[boundedIndex]
         guard seconds != effectiveRefreshSeconds else { return }
-        if store.renderingRefreshSeconds != nil {
-            store.renderingRefreshSeconds = seconds
-        } else {
-            store.refreshSeconds = seconds
-        }
+        store.refreshSeconds = seconds
     }
 }
 
@@ -1454,6 +1113,8 @@ private enum ChartLayout {
     static let weekdayLabelWidth: CGFloat = 10
     static let ruleWidth: CGFloat = 1
     static let tooltipHalfWidth: CGFloat = 76
+    static let heatmapHoverOutlineWidth: CGFloat = 1.5
+    static let heatmapHoverBleed: CGFloat = heatmapHoverOutlineWidth / 2 + 0.5
     static let hoverAnimation = Animation.easeOut(duration: 0.10)
     static let scaleAnimation = Animation.easeInOut(duration: 0.20)
     static let heatmapHoverAnimation = Animation.easeOut(duration: 0.045)
@@ -1747,6 +1408,7 @@ private struct TokenDailyHeatmap: View {
                 + metrics.columnSpacing * CGFloat(visibleWeekCount - 1)
             let trailingGap = metrics.labelSpacing
                 + max(0, availablePlotWidth - plotWidth)
+            let heatmapHoverBleed = ChartLayout.heatmapHoverBleed
 
             HStack(alignment: .top, spacing: 0) {
                 VStack(spacing: metrics.rowSpacing) {
@@ -1761,6 +1423,7 @@ private struct TokenDailyHeatmap: View {
                                 alignment: .center)
                         }
                     }
+                    .padding(.vertical, heatmapHoverBleed)
                 Color.clear
                     .frame(width: metrics.labelSpacing, height: 1)
                 ZStack(alignment: .bottom) {
@@ -1780,6 +1443,10 @@ private struct TokenDailyHeatmap: View {
                                         height: ChartLayout.plotHeight))
                             }
                             .frame(width: metrics.contentWidth, height: ChartLayout.plotHeight)
+                            .padding(.vertical, heatmapHoverBleed)
+                            .frame(
+                                width: metrics.contentWidth,
+                                height: ChartLayout.plotHeight + heatmapHoverBleed * 2)
                             .frame(height: ChartLayout.timelineHeight, alignment: .top)
                             Color.clear
                                 .frame(width: 1, height: 1)
@@ -1939,9 +1606,8 @@ private struct HeatmapHoverOverlay: View {
         self.metrics = metrics
         self.viewport = viewport
         self.plotSize = plotSize
-        let forcedIndex = Self.forcedHoverIndex(in: model.points)
-        _hoveredIndex = State(initialValue: forcedIndex)
-        _highlightedIndex = State(initialValue: forcedIndex ?? 0)
+        _hoveredIndex = State(initialValue: nil)
+        _highlightedIndex = State(initialValue: 0)
     }
 
     var body: some View {
@@ -1951,8 +1617,8 @@ private struct HeatmapHoverOverlay: View {
 
             let center = metrics.cellCenter(at: highlightedIndex)
             RoundedRectangle(cornerRadius: 2)
-                .stroke(theme.hoverOutline, lineWidth: 1.5)
-                .frame(width: metrics.cellSize + 2, height: metrics.cellSize + 2)
+                .stroke(theme.hoverOutline, lineWidth: ChartLayout.heatmapHoverOutlineWidth)
+                .frame(width: metrics.cellSize, height: metrics.cellSize)
                 .position(center)
                 .opacity(activeIndex == nil ? 0 : 1)
                 .scaleEffect(activeIndex == nil ? 0.92 : 1)
@@ -1996,15 +1662,6 @@ private struct HeatmapHoverOverlay: View {
               model.points[index].date <= model.latestDate
         else { return nil }
         return index
-    }
-
-    private static func forcedHoverIndex(in points: [TokenPlotPoint]) -> Int? {
-        guard let match = ProcessInfo.processInfo.environment["AIUSAGE_SNAPSHOT_HOVER"],
-              !match.isEmpty
-        else { return nil }
-        return points.firstIndex { point in
-            dayHelp(point).localizedCaseInsensitiveContains(match)
-        }
     }
 
     private func updateHoveredIndex(_ index: Int?) {
@@ -2052,18 +1709,11 @@ private struct HeatmapHoverOverlay: View {
 private struct TokenWeeklyBars: View {
     var buckets: [TokenWeekBucket]
     @State private var hoveredIndex: Int?
-    @State private var scrollTarget: String?
     @State private var viewport = ChartViewport()
     @State private var legendHidden = false
     @State private var scrollIndicatorVisible = false
     @State private var legendRevealTask: Task<Void, Never>?
     @Environment(\.usageVisualTheme) private var theme
-
-    init(buckets: [TokenWeekBucket]) {
-        self.buckets = buckets
-        _hoveredIndex = State(initialValue: nil)
-        _scrollTarget = State(initialValue: "weekly-latest")
-    }
 
     var body: some View {
         let range = visibleIndexRange(
@@ -2107,60 +1757,71 @@ private struct TokenWeeklyBars: View {
                     : contentWidth / CGFloat(buckets.count)
 
                 ZStack(alignment: .bottom) {
-                    ScrollView(.horizontal) {
-                        HStack(spacing: 0) {
-                            ZStack(alignment: .topLeading) {
-                                let activeIndex = hoveredIndex ?? forcedHoverIndex
-                                let highlightIndex = activeIndex ?? 0
-                                Rectangle()
-                                    .fill(theme.hoverFill)
-                                    .frame(width: columnWidth, height: ChartLayout.plotHeight)
-                                    .position(
-                                        x: (CGFloat(highlightIndex) + 0.5) * columnWidth,
-                                        y: ChartLayout.plotHeight / 2)
-                                    .opacity(activeIndex == nil ? 0 : 1)
-                                    .animation(ChartLayout.hoverAnimation, value: hoveredIndex)
-
-                                HStack(alignment: .bottom, spacing: 0) {
-                                    ForEach(buckets.indices, id: \.self) { index in
-                                        let bucket = buckets[index]
-                                        let fraction = CGFloat(
-                                            Double(bucket.tokens) / Double(maximumValue))
-                                        RoundedRectangle(cornerRadius: 2)
-                                            .fill(theme.dataMark)
-                                            .frame(width: max(
-                                                2,
-                                                columnWidth
-                                                    - LayoutSpacing.compact * 2 / 3))
-                                            .frame(
-                                                width: columnWidth,
-                                                height: max(
-                                                    2,
-                                                    ChartLayout.plotHeight
-                                                        * min(1, fraction)),
-                                                alignment: .bottom)
-                                    }
-                                }
-                                .frame(
-                                    width: contentWidth,
-                                    height: ChartLayout.plotHeight,
-                                    alignment: .bottom)
-                                .animation(
-                                    ChartLayout.scaleAnimation,
-                                    value: maximumValue)
-
-                                if let activeIndex, buckets.indices.contains(activeIndex) {
-                                    let centerX = (CGFloat(activeIndex) + 0.5) * columnWidth
-                                    ChartHoverLabel(text: weekHelp(buckets[activeIndex]))
-                                        .position(
-                                            x: viewportTooltipX(
-                                                centerX,
-                                                viewport: viewport,
-                                                contentWidth: contentWidth),
-                                            y: 12)
+                    ScrollViewReader { scrollProxy in
+                        ScrollView(.horizontal) {
+                            HStack(spacing: 0) {
+                            HStack(spacing: 0) {
+                                ForEach(buckets.indices, id: \.self) { index in
+                                    Color.clear
+                                        .frame(width: columnWidth, height: 1)
+                                        .id("weekly-\(index)")
                                 }
                             }
+                            .scrollTargetLayout()
                             .frame(width: contentWidth, height: ChartLayout.plotHeight)
+                            .overlay(alignment: .topLeading) {
+                                ZStack(alignment: .topLeading) {
+                                    let activeIndex = hoveredIndex
+                                    let highlightIndex = activeIndex ?? 0
+                                    Rectangle()
+                                        .fill(theme.hoverFill)
+                                        .frame(width: columnWidth, height: ChartLayout.plotHeight)
+                                        .position(
+                                            x: (CGFloat(highlightIndex) + 0.5) * columnWidth,
+                                            y: ChartLayout.plotHeight / 2)
+                                        .opacity(activeIndex == nil ? 0 : 1)
+                                        .animation(ChartLayout.hoverAnimation, value: hoveredIndex)
+
+                                    HStack(alignment: .bottom, spacing: 0) {
+                                        ForEach(buckets.indices, id: \.self) { index in
+                                            let bucket = buckets[index]
+                                            let fraction = CGFloat(
+                                                Double(bucket.tokens) / Double(maximumValue))
+                                            RoundedRectangle(cornerRadius: 2)
+                                                .fill(theme.dataMark)
+                                                .frame(width: max(
+                                                    2,
+                                                    columnWidth
+                                                        - LayoutSpacing.compact * 2 / 3))
+                                                .frame(
+                                                    width: columnWidth,
+                                                    height: max(
+                                                        2,
+                                                        ChartLayout.plotHeight
+                                                            * min(1, fraction)),
+                                                    alignment: .bottom)
+                                        }
+                                    }
+                                    .frame(
+                                        width: contentWidth,
+                                        height: ChartLayout.plotHeight,
+                                        alignment: .bottom)
+                                    .animation(
+                                        ChartLayout.scaleAnimation,
+                                        value: maximumValue)
+
+                                    if let activeIndex, buckets.indices.contains(activeIndex) {
+                                        let centerX = (CGFloat(activeIndex) + 0.5) * columnWidth
+                                        ChartHoverLabel(text: weekHelp(buckets[activeIndex]))
+                                            .position(
+                                                x: viewportTooltipX(
+                                                    centerX,
+                                                    viewport: viewport,
+                                                    contentWidth: contentWidth),
+                                                y: 12)
+                                    }
+                                }
+                            }
                             .contentShape(Rectangle())
                             .onContinuousHover { phase in
                                 switch phase {
@@ -2176,16 +1837,21 @@ private struct TokenWeeklyBars: View {
                             Color.clear
                                 .frame(width: 1, height: 1)
                                 .id("weekly-latest")
+                            }
+                        }
+                        .defaultScrollAnchor(.trailing)
+                        .scrollIndicators(.hidden)
+                        .scrollTargetBehavior(CellSnapScrollTargetBehavior(step: columnWidth))
+                        .trackChartScroll(
+                            viewport: $viewport,
+                            unitWidth: columnWidth,
+                            phaseChanged: updateScrollPhase)
+                        .onAppear {
+                            DispatchQueue.main.async {
+                                scrollProxy.scrollTo("weekly-latest", anchor: .trailing)
+                            }
                         }
                     }
-                    .defaultScrollAnchor(.trailing)
-                    .scrollIndicators(.hidden)
-                    .scrollPosition(id: $scrollTarget, anchor: .trailing)
-                    .scrollTargetBehavior(CellSnapScrollTargetBehavior(step: columnWidth))
-                    .trackChartScroll(
-                        viewport: $viewport,
-                        unitWidth: columnWidth,
-                        phaseChanged: updateScrollPhase)
 
                     ChartScrollIndicator(
                         viewport: viewport,
@@ -2207,13 +1873,6 @@ private struct TokenWeeklyBars: View {
         let start = bucket.startDate.formatted(.dateTime.month(.abbreviated).day())
         let end = bucket.endDate.formatted(.dateTime.month(.abbreviated).day())
         return "\(start)–\(end) · \(DisplayFormatter.compactTokens(bucket.tokens))"
-    }
-
-    private var forcedHoverIndex: Int? {
-        guard let match = ProcessInfo.processInfo.environment["AIUSAGE_SNAPSHOT_HOVER"],
-              !match.isEmpty
-        else { return nil }
-        return buckets.firstIndex { weekHelp($0).localizedCaseInsensitiveContains(match) }
     }
 
     private func bucketIndex(at x: CGFloat, width: CGFloat) -> Int? {
@@ -2263,13 +1922,7 @@ private struct TokenCumulativeLine: View {
             total += day.tokens
             return TokenPlotPoint(date: date, tokens: total)
         }
-        if let rawX = ProcessInfo.processInfo.environment["AIUSAGE_SNAPSHOT_HOVER_X"],
-           let normalizedX = Double(rawX)
-        {
-            _hoverLocation = State(initialValue: CGPoint(x: normalizedX, y: 0))
-        } else {
-            _hoverLocation = State(initialValue: nil)
-        }
+        _hoverLocation = State(initialValue: nil)
         _scrollTarget = State(initialValue: "cumulative-latest")
     }
 
@@ -2409,11 +2062,6 @@ private struct TokenCumulativeLine: View {
 
     private func resolvedHoverLocation(in size: CGSize) -> CGPoint? {
         guard let hoverLocation else { return nil }
-        if ProcessInfo.processInfo.environment["AIUSAGE_SNAPSHOT_HOVER_X"] != nil {
-            return CGPoint(
-                x: min(max(0, hoverLocation.x), 1) * size.width,
-                y: hoverLocation.y)
-        }
         return CGPoint(x: min(max(0, hoverLocation.x), size.width), y: hoverLocation.y)
     }
 
@@ -2531,19 +2179,12 @@ private struct HoverDetailModifier: ViewModifier {
     @State private var showsDetail = false
     @State private var hoverTask: Task<Void, Never>?
 
-    private var isForcedForSnapshot: Bool {
-        guard let match = ProcessInfo.processInfo.environment["AIUSAGE_SNAPSHOT_HOVER"],
-              !match.isEmpty
-        else { return false }
-        return text.localizedCaseInsensitiveContains(match)
-    }
-
     func body(content: Content) -> some View {
         content
             .contentShape(Rectangle())
             .onHover(perform: updateHover)
             .overlay(alignment: alignment) {
-                if showsDetail || isForcedForSnapshot {
+                if showsDetail {
                     ChartHoverLabel(text: text)
                         .offset(y: -28)
                 }

@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "aiusage",
+    name: "AgentUsage",
     platforms: [
         .macOS(.v14),
     ],
     products: [
-        .executable(name: "aiusage", targets: ["aiusage"]),
+        .executable(name: "AgentUsage", targets: ["AgentUsage"]),
     ],
     targets: [
         .executableTarget(
-            name: "aiusage"),
+            name: "AgentUsage"),
     ])

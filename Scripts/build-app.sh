@@ -2,17 +2,17 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="aiusage"
+APP_NAME="AgentUsage"
 CONFIGURATION="release"
 APP_DIR="$ROOT_DIR/.build/$CONFIGURATION/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
-ICON_SOURCE="$ROOT_DIR/Assets/aiusage.icns"
+ICON_SOURCE="$ROOT_DIR/Assets/AgentUsage.icns"
 
 cd "$ROOT_DIR"
-if [[ -n "${AIUSAGE_EXECUTABLE:-}" ]]; then
-  EXECUTABLE="$AIUSAGE_EXECUTABLE"
+if [[ -n "${AGENTUSAGE_EXECUTABLE:-}" ]]; then
+  EXECUTABLE="$AGENTUSAGE_EXECUTABLE"
 else
   swift build -c "$CONFIGURATION" --product "$APP_NAME"
   EXECUTABLE="$ROOT_DIR/.build/$CONFIGURATION/$APP_NAME"
@@ -31,7 +31,7 @@ if [[ ! -f "$ICON_SOURCE" ]]; then
   echo "Icon not found: $ICON_SOURCE" >&2
   exit 1
 fi
-cp "$ICON_SOURCE" "$RESOURCES_DIR/aiusage.icns"
+cp "$ICON_SOURCE" "$RESOURCES_DIR/AgentUsage.icns"
 
 cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -41,15 +41,15 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleExecutable</key>
-  <string>aiusage</string>
+  <string>AgentUsage</string>
   <key>CFBundleIdentifier</key>
-  <string>io.github.rock-z.aiusage</string>
+  <string>io.github.rock-z.agentusage</string>
   <key>CFBundleIconFile</key>
-  <string>aiusage</string>
+  <string>AgentUsage</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>aiusage</string>
+  <string>AgentUsage</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
