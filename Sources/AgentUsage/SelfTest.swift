@@ -20,6 +20,7 @@ enum SelfTest {
         try testCodexAccountUsageParsingAndFormatting()
         try testPreferredAxisMaximums()
         try testMenuProviderSelectionFollowsSingleTrackedProvider()
+        try testUpdateActionTitles()
         try testWeeklyActivityUsesMondayThroughSundayBuckets()
         try testPartialDualLimitFormatting()
         try testResetCreditSummaryAndExpirationHelp()
@@ -142,6 +143,16 @@ enum SelfTest {
         try expect(
             MenuProviderSelection.combined.constrained(to: [.codex, .claude]) == .combined,
             "expected Both to remain available when both providers are tracked")
+    }
+
+    private static func testUpdateActionTitles() throws {
+        try expect(
+            UpdateController.actionTitle(readyVersion: nil) == "Check for Updates",
+            "expected default update action")
+        try expect(
+            UpdateController.actionTitle(readyVersion: "0.4.2")
+                == "Update v0.4.2 Ready - Install",
+            "expected ready update action")
     }
 
     private static func testWeeklyActivityUsesMondayThroughSundayBuckets() throws {

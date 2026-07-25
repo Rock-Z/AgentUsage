@@ -32,21 +32,21 @@ jobs:
             .build/arm64/arm64-apple-macosx/release/AgentUsage \
             .build/x86_64/x86_64-apple-macosx/release/AgentUsage \
             -output .build/universal/AgentUsage
-          AGENTUSAGE_EXECUTABLE="$PWD/.build/universal/AgentUsage" ./Scripts/build-app.sh
+          AGENTUSAGE_EXECUTABLE="$PWD/.build/universal/AgentUsage" \
+            AGENTUSAGE_SPARKLE_FRAMEWORK="$PWD/.build/arm64/arm64-apple-macosx/release/Sparkle.framework" \
+            ./Scripts/build-app.sh
 
-      - name: Ad-hoc sign
+      - name: Verify app bundle
         shell: bash
-        run: |
-          set -euo pipefail
-          app=".build/release/AgentUsage.app"
-          codesign --force --options runtime --sign - "$app/Contents/MacOS/AgentUsage"
-          codesign --force --options runtime --sign - "$app"
-          codesign --verify --deep --strict --verbose=2 "$app"
+        run: codesign --verify --deep --strict --verbose=2 .build/release/AgentUsage.app
 
       - name: Package release
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         shell: bash
         run: |
           set -euo pipefail
+          test -n "$SPARKLE_ED_PRIVATE_KEY"
           mkdir -p dist
           ditto -c -k --keepParent .build/release/AgentUsage.app dist/AgentUsage-macos-universal.zip
           dmg_root="$RUNNER_TEMP/AgentUsage-dmg"
@@ -60,6 +60,18 @@ jobs:
             -format UDZO \
             dist/AgentUsage-macos-universal.dmg
           hdiutil verify dist/AgentUsage-macos-universal.dmg
+
+          appcast_root="$RUNNER_TEMP/AgentUsage-appcast"
+          mkdir -p "$appcast_root"
+          cp dist/AgentUsage-macos-universal.dmg "$appcast_root/"
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" \
+            | .build/artifacts/sparkle/Sparkle/bin/generate_appcast \
+                --ed-key-file - \
+                --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/" \
+                --maximum-deltas 0 \
+                "$appcast_root"
+          cp "$appcast_root/appcast.xml" dist/appcast.xml
+
           (
             cd dist
             shasum -a 256 AgentUsage-macos-universal.zip > AgentUsage-macos-universal.zip.sha256
@@ -77,6 +89,7 @@ jobs:
             dist/AgentUsage-macos-universal.zip.sha256 \
             dist/AgentUsage-macos-universal.dmg \
             dist/AgentUsage-macos-universal.dmg.sha256 \
+            dist/appcast.xml \
             dist/install.sh \
             --verify-tag \
             --generate-notes \

@@ -5,6 +5,7 @@ import SwiftUI
 @main
 struct AgentUsageApp: App {
     @StateObject private var store = UsageStore()
+    @StateObject private var updateController = UpdateController()
 
     init() {
         if CommandLine.arguments.contains("--self-test") {
@@ -25,7 +26,9 @@ struct AgentUsageApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuContentView(store: store)
+            MenuContentView(
+                store: store,
+                updateController: updateController)
                 .frame(width: 360)
         } label: {
             MenuBarLabelView(store: store)
@@ -242,11 +245,14 @@ final class UsageStore: ObservableObject {
 
 struct MenuContentView: View {
     @ObservedObject var store: UsageStore
+    @ObservedObject var updateController: UpdateController
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
     private static let refreshIntervals = [5, 15, 30, 60, 300, 900, 1_800, 3_600]
     private static let footerLabelWidth: CGFloat = 48
+    private static let currentVersion =
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Dev"
     // A width divisible by both 3- and 4-option pickers keeps native segment
     // boundaries on whole Retina pixels instead of softening alternating labels.
     private static let footerControlWidth: CGFloat = 276
@@ -292,8 +298,13 @@ struct MenuContentView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Text("AgentUsage")
-                .font(.headline)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("AgentUsage")
+                    .font(.headline)
+                Text("v\(Self.currentVersion)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             Button {
                 store.refreshAll()
@@ -325,95 +336,118 @@ struct MenuContentView: View {
     }
 
     private var footer: some View {
-        Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
-            GridRow {
-                Text("Track")
-                    .foregroundStyle(visualTheme.textColor)
-                    .frame(width: Self.footerLabelWidth, alignment: .leading)
-                HStack(spacing: 12) {
-                    ForEach(Provider.allCases) { provider in
-                        Toggle(provider.displayName, isOn: Binding(
-                            get: { store.isTracking(provider) },
-                            set: { store.setTracking(provider, enabled: $0) }))
-                            .toggleStyle(.checkbox)
+        VStack(alignment: .leading, spacing: 4) {
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
+                GridRow {
+                    Text("Track")
+                        .foregroundStyle(visualTheme.textColor)
+                        .frame(width: Self.footerLabelWidth, alignment: .leading)
+                    HStack(spacing: 12) {
+                        ForEach(Provider.allCases) { provider in
+                            Toggle(provider.displayName, isOn: Binding(
+                                get: { store.isTracking(provider) },
+                                set: { store.setTracking(provider, enabled: $0) }))
+                                .toggleStyle(.checkbox)
+                        }
                     }
+                    .frame(width: Self.footerControlWidth, alignment: .leading)
                 }
-                .frame(width: Self.footerControlWidth, alignment: .leading)
-            }
-            GridRow {
-                Text("Menu")
-                    .foregroundStyle(visualTheme.textColor)
-                    .frame(width: Self.footerLabelWidth, alignment: .leading)
-                Picker("", selection: Binding(
-                    get: { store.menuProvider },
-                    set: { store.menuProvider = $0 }))
-                {
-                    ForEach(MenuProviderSelection.allCases) { option in
-                        Text(option.label).tag(option)
+                GridRow {
+                    Text("Menu")
+                        .foregroundStyle(visualTheme.textColor)
+                        .frame(width: Self.footerLabelWidth, alignment: .leading)
+                    Picker("", selection: Binding(
+                            get: { store.menuProvider },
+                            set: { store.menuProvider = $0 }))
+                    {
+                        ForEach(MenuProviderSelection.allCases) { option in
+                            Text(option.label).tag(option)
+                        }
                     }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .focusable(false)
+                    .frame(width: Self.footerControlWidth)
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .focusable(false)
-                .frame(width: Self.footerControlWidth)
-            }
-            GridRow {
-                Text("Metric")
-                    .foregroundStyle(visualTheme.textColor)
-                    .frame(width: Self.footerLabelWidth, alignment: .leading)
-                Picker("", selection: Binding(
-                    get: { store.menuMetric },
-                    set: { store.menuMetric = $0 }))
-                {
-                    ForEach(MenuMetric.allCases) { metric in
-                        Text(store.menuMetricLabel(metric)).tag(metric)
+                GridRow {
+                    Text("Metric")
+                        .foregroundStyle(visualTheme.textColor)
+                        .frame(width: Self.footerLabelWidth, alignment: .leading)
+                    Picker("", selection: Binding(
+                            get: { store.menuMetric },
+                            set: { store.menuMetric = $0 }))
+                    {
+                        ForEach(MenuMetric.allCases) { metric in
+                            Text(store.menuMetricLabel(metric)).tag(metric)
+                        }
                     }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .focusable(false)
+                    .frame(width: Self.footerControlWidth)
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .focusable(false)
-                .frame(width: Self.footerControlWidth)
-            }
-            GridRow {
-                Text("Display")
-                    .foregroundStyle(visualTheme.textColor)
-                    .frame(width: Self.footerLabelWidth, alignment: .leading)
-                Picker("", selection: Binding(
-                    get: { store.menuDisplayMode },
-                    set: { store.menuDisplayMode = $0 }))
-                {
-                    ForEach(MenuDisplayMode.allCases) { mode in
-                        Text(mode.label).tag(mode)
+                GridRow {
+                    Text("Display")
+                        .foregroundStyle(visualTheme.textColor)
+                        .frame(width: Self.footerLabelWidth, alignment: .leading)
+                    Picker("", selection: Binding(
+                            get: { store.menuDisplayMode },
+                            set: { store.menuDisplayMode = $0 }))
+                    {
+                        ForEach(MenuDisplayMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
                     }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .focusable(false)
+                    .frame(width: Self.footerControlWidth)
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .focusable(false)
-                .frame(width: Self.footerControlWidth)
-            }
-            GridRow {
-                Text("Refresh")
-                    .foregroundStyle(visualTheme.textColor)
-                    .frame(width: Self.footerLabelWidth, alignment: .leading)
-                HStack(spacing: 10) {
-                    DiscreteRefreshSlider(
-                        index: Binding(
-                            get: { refreshIntervalIndex },
-                            set: { setRefreshInterval(index: $0) }),
-                        count: Self.refreshIntervals.count,
-                        valueLabel: refreshIntervalLabel,
-                        tint: visualTheme.accentColor,
-                        onEditingEnded: store.restartTimer)
-                    .padding(.horizontal, 10)
-                    Text(refreshIntervalLabel)
-                        .monospacedDigit()
-                        .frame(width: 44, alignment: .trailing)
+                GridRow {
+                    Text("Refresh")
+                        .foregroundStyle(visualTheme.textColor)
+                        .frame(width: Self.footerLabelWidth, alignment: .leading)
+                    HStack(spacing: 10) {
+                        DiscreteRefreshSlider(
+                            index: Binding(
+                                get: { refreshIntervalIndex },
+                                set: { setRefreshInterval(index: $0) }),
+                            count: Self.refreshIntervals.count,
+                            valueLabel: refreshIntervalLabel,
+                            tint: visualTheme.accentColor,
+                            onEditingEnded: store.restartTimer)
+                        .padding(.horizontal, 10)
+                        Text(refreshIntervalLabel)
+                            .monospacedDigit()
+                            .frame(width: 44, alignment: .trailing)
+                    }
+                    .frame(width: Self.footerControlWidth)
                 }
-                .frame(width: Self.footerControlWidth)
             }
+
+            VStack(alignment: .leading, spacing: 0) {
+                FooterActionButton(
+                    title: updateController.actionTitle,
+                    width: Self.footerLabelWidth + 12 + Self.footerControlWidth,
+                    textColor: visualTheme.textColor,
+                    hoverFill: visualTheme.controlTrack) {
+                    updateController.performAction()
+                }
+                .disabled(!updateController.canPerformAction)
+                FooterActionButton(
+                    title: "Quit AgentUsage",
+                    width: Self.footerLabelWidth + 12 + Self.footerControlWidth,
+                    textColor: visualTheme.textColor,
+                    hoverFill: visualTheme.controlTrack) {
+                    NSApplication.shared.terminate(nil)
+                }
+            }
+            .padding(.horizontal, -8)
         }
         .font(.callout)
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
     }
 
     private var refreshIntervalIndex: Int {
@@ -442,6 +476,39 @@ struct MenuContentView: View {
         let seconds = Self.refreshIntervals[boundedIndex]
         guard seconds != effectiveRefreshSeconds else { return }
         store.refreshSeconds = seconds
+    }
+}
+
+private struct FooterActionButton: View {
+    var title: String
+    var width: CGFloat
+    var textColor: Color
+    var hoverFill: Color
+    var action: () -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .foregroundStyle(textColor.opacity(isEnabled ? 1 : 0.45))
+                .frame(width: width, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .contentShape(Rectangle())
+                .background {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isHovering && isEnabled ? hoverFill : .clear)
+                }
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.10)) {
+                isHovering = hovering
+            }
+        }
     }
 }
 

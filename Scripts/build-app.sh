@@ -8,6 +8,7 @@ APP_DIR="$ROOT_DIR/.build/$CONFIGURATION/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 ICON_SOURCE="$ROOT_DIR/Assets/AgentUsage.icns"
 
 cd "$ROOT_DIR"
@@ -23,9 +24,27 @@ if [[ ! -x "$EXECUTABLE" ]]; then
   exit 1
 fi
 
+if [[ -n "${AGENTUSAGE_SPARKLE_FRAMEWORK:-}" ]]; then
+  SPARKLE_FRAMEWORK="$AGENTUSAGE_SPARKLE_FRAMEWORK"
+else
+  SPARKLE_FRAMEWORK="$(dirname "$EXECUTABLE")/Sparkle.framework"
+fi
+if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
+  echo "Sparkle framework not found: $SPARKLE_FRAMEWORK" >&2
+  exit 1
+fi
+
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$FRAMEWORKS_DIR"
 cp "$EXECUTABLE" "$MACOS_DIR/$APP_NAME"
+if ! otool -l "$MACOS_DIR/$APP_NAME" \
+  | grep -F "@executable_path/../Frameworks" >/dev/null
+then
+  install_name_tool \
+    -add_rpath "@executable_path/../Frameworks" \
+    "$MACOS_DIR/$APP_NAME"
+fi
+ditto "$SPARKLE_FRAMEWORK" "$FRAMEWORKS_DIR/Sparkle.framework"
 
 if [[ ! -f "$ICON_SOURCE" ]]; then
   echo "Icon not found: $ICON_SOURCE" >&2
@@ -53,18 +72,36 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.4.0</string>
+  <string>0.4.1</string>
   <key>CFBundleVersion</key>
-  <string>6</string>
+  <string>7</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>LSUIElement</key>
   <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>SUAllowsAutomaticUpdates</key>
+  <true/>
+  <key>SUAutomaticallyUpdate</key>
+  <true/>
+  <key>SUEnableAutomaticChecks</key>
+  <true/>
+  <key>SUEnableSystemProfiling</key>
+  <false/>
+  <key>SUFeedURL</key>
+  <string>https://github.com/Rock-Z/AgentUsage/releases/latest/download/appcast.xml</string>
+  <key>SUPublicEDKey</key>
+  <string>z0ZEDTHSjxN7x48Jx9hFt8hblll/xhpOuFjzCdp/QOs=</string>
+  <key>SUScheduledCheckInterval</key>
+  <integer>3600</integer>
+  <key>SUVerifyUpdateBeforeExtraction</key>
+  <true/>
 </dict>
 </plist>
 PLIST
+
+"$ROOT_DIR/Scripts/sign-app.sh" "$APP_DIR"
 
 echo "Built $APP_DIR"
 

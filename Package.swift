@@ -9,7 +9,15 @@ let package = Package(
     products: [
         .executable(name: "AgentUsage", targets: ["AgentUsage"]),
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/sparkle-project/Sparkle",
+            from: "2.9.2"),
+    ],
     targets: [
         .executableTarget(
-            name: "AgentUsage"),
+            name: "AgentUsage",
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle"),
+            ]),
     ])
