@@ -13,10 +13,7 @@ enum SelfTest {
     }
 
     static func run() throws {
-        try testMenuTitleShowsSelectedFiveHourUsedPercent()
-        try testMenuTitleShowsSelectedCodexCredits()
-        try testMenuTitleShowsCombinedClaudeBillingDollars()
-        try testMenuTitleFallsBackToDollarsWhenWindowMissing()
+        try testCreditFormatting()
         try testClaudeOAuthUsageParserReadsWindows()
         try testClaudeOAuthCredentialParserReadsClaudeCodeShape()
         try testDurationLabelsAndCodexWindowClassification()
@@ -31,102 +28,6 @@ enum SelfTest {
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         guard condition() else { throw Failure.expectation(message) }
-    }
-
-    private static func testMenuTitleShowsSelectedFiveHourUsedPercent() throws {
-        let states: [Provider: ProviderState] = [
-            .codex: ProviderState(snapshot: UsageSnapshot(
-                provider: .codex,
-                fiveHour: RateWindow(usedPercent: 41.6, windowMinutes: 300, resetsAt: nil, resetDescription: nil),
-                sevenDay: nil,
-                billingCost: nil,
-                localUsageCost: nil,
-                accountEmail: nil,
-                plan: nil,
-                source: "test",
-                updatedAt: Date())),
-        ]
-
-        let title = DisplayFormatter.menuTitle(
-            states: states,
-            providerSelection: .codex,
-            metric: .fiveHourPercent,
-            showUsed: false)
-
-        try expect(title == "Codex 58%", "expected Codex 58%, got \(title)")
-    }
-
-    private static func testMenuTitleShowsSelectedCodexCredits() throws {
-        let states: [Provider: ProviderState] = [
-            .codex: ProviderState(snapshot: UsageSnapshot(
-                provider: .codex,
-                fiveHour: nil,
-                sevenDay: nil,
-                credits: CreditSnapshot(balance: 1492.8456, hasCredits: true, unlimited: false),
-                billingCost: nil,
-                localUsageCost: nil,
-                accountEmail: nil,
-                plan: nil,
-                source: "test",
-                updatedAt: Date())),
-        ]
-
-        let title = DisplayFormatter.menuTitle(
-            states: states,
-            providerSelection: .codex,
-            metric: .billingDollars,
-            showUsed: true)
-
-        try expect(title == "Codex 1,493", "expected Codex credits, got \(title)")
-    }
-
-    private static func testMenuTitleShowsCombinedClaudeBillingDollars() throws {
-        let start = Date()
-        let states: [Provider: ProviderState] = [
-            .codex: ProviderState(snapshot: UsageSnapshot(
-                provider: .codex,
-                fiveHour: nil,
-                sevenDay: nil,
-                credits: CreditSnapshot(balance: 1492.8456, hasCredits: true, unlimited: false),
-                billingCost: nil,
-                localUsageCost: nil,
-                accountEmail: nil,
-                plan: nil,
-                source: "test",
-                updatedAt: Date())),
-            .claude: ProviderState(snapshot: snapshot(provider: .claude, dollars: 3.5, since: start)),
-        ]
-
-        let title = DisplayFormatter.menuTitle(
-            states: states,
-            providerSelection: .combined,
-            metric: .billingDollars,
-            showUsed: true)
-
-        try expect(title == "AI $3.50", "expected AI $3.50, got \(title)")
-    }
-
-    private static func testMenuTitleFallsBackToDollarsWhenWindowMissing() throws {
-        let states: [Provider: ProviderState] = [
-            .claude: ProviderState(snapshot: UsageSnapshot(
-                provider: .claude,
-                fiveHour: nil,
-                sevenDay: nil,
-                billingCost: nil,
-                localUsageCost: CostSnapshot(dollars: 12.34, since: Date(), updatedAt: Date(), scannedFiles: 0),
-                accountEmail: nil,
-                plan: "Claude Enterprise",
-                source: "test",
-                updatedAt: Date())),
-        ]
-
-        let title = DisplayFormatter.menuTitle(
-            states: states,
-            providerSelection: .claude,
-            metric: .fiveHourPercent,
-            showUsed: true)
-
-        try expect(title == "Claude Code $12.34", "expected Claude dollar fallback, got \(title)")
     }
 
     private static func testClaudeOAuthUsageParserReadsWindows() throws {
@@ -276,8 +177,7 @@ enum SelfTest {
         let text = DisplayFormatter.menuPercentText(
             window: nil,
             innerWindow: weekly,
-            metric: .bothPercent,
-            showUsed: false)
+            metric: .bothPercent)
         try expect(text == "7d: 97%", "expected weekly-only dual text, got \(text ?? "nil")")
     }
 
@@ -399,17 +299,23 @@ enum SelfTest {
         try expect(Self.visiblePixelCount(in: weeklyOnlyImage) > 8, "expected visible weekly-only status image")
     }
 
-    private static func snapshot(provider: Provider, dollars: Double, since: Date) -> UsageSnapshot {
-        UsageSnapshot(
-            provider: provider,
-            fiveHour: nil,
-            sevenDay: nil,
-            billingCost: CostSnapshot(dollars: dollars, since: since, updatedAt: Date(), scannedFiles: 0),
-            localUsageCost: nil,
-            accountEmail: nil,
-            plan: nil,
-            source: "test",
-            updatedAt: Date())
+    private static func testCreditFormatting() throws {
+        let plainCredits = CreditSnapshot(
+            balance: 1492.8456,
+            hasCredits: true,
+            unlimited: false)
+        let dollarCredits = CreditSnapshot(
+            balance: 62.5,
+            hasCredits: true,
+            unlimited: false,
+            currencyCode: "USD")
+        let unlimited = CreditSnapshot(balance: nil, hasCredits: false, unlimited: true)
+        let empty = CreditSnapshot(balance: nil, hasCredits: false, unlimited: false)
+
+        try expect(DisplayFormatter.credits(plainCredits) == "1,493", "expected grouped credit balance")
+        try expect(DisplayFormatter.credits(dollarCredits) == "$62.50", "expected USD credit balance")
+        try expect(DisplayFormatter.credits(unlimited) == "Unlimited", "expected unlimited credits")
+        try expect(DisplayFormatter.credits(empty) == "--", "expected placeholder without credits")
     }
 
     private static func visiblePixelCount(in image: NSImage) -> Int {

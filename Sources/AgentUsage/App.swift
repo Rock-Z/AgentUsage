@@ -41,7 +41,6 @@ final class UsageStore: ObservableObject {
         .claude: ProviderState(),
     ]
     @AppStorage("refreshSeconds") var refreshSeconds = 60
-    @AppStorage("showUsedPercent") var showUsedPercent = false
     @AppStorage("trackCodex") var trackCodex = true
     @AppStorage("trackClaude") var trackClaude = true
     @AppStorage("menuMetric") private var menuMetricRaw = MenuMetric.fiveHourPercent.rawValue
@@ -65,14 +64,6 @@ final class UsageStore: ObservableObject {
     var menuDisplayMode: MenuDisplayMode {
         get { MenuDisplayMode(rawValue: menuDisplayModeRaw) ?? .ring }
         set { menuDisplayModeRaw = newValue.rawValue }
-    }
-
-    var menuBarTitle: String {
-        DisplayFormatter.menuTitle(
-            states: states,
-            providerSelection: menuProvider,
-            metric: menuMetric,
-            showUsed: false)
     }
 
     var menuBarWindow: RateWindow? {
@@ -106,8 +97,7 @@ final class UsageStore: ObservableObject {
         DisplayFormatter.menuPercentText(
             window: menuBarWindow,
             innerWindow: menuBarInnerWindow,
-            metric: menuMetric,
-            showUsed: false)
+            metric: menuMetric)
     }
 
     func menuMetricLabel(_ metric: MenuMetric) -> String {
@@ -617,8 +607,7 @@ struct MenuBarLabelView: View {
             percentText: DisplayFormatter.menuPercentText(
                 window: window,
                 innerWindow: innerWindow,
-                metric: store.menuMetric,
-                showUsed: false),
+                metric: store.menuMetric),
             amountText: amountText)
     }
 }
@@ -1672,14 +1661,11 @@ private struct HeatmapHoverOverlay: View {
         hoveredIndex = index
     }
 
-    private static func dayHelp(_ point: TokenPlotPoint) -> String {
+    private func dayHelp(_ point: TokenPlotPoint) -> String {
         let date = point.date.formatted(.dateTime.month(.abbreviated).day())
         return "\(date) – \(DisplayFormatter.compactTokens(point.tokens))"
     }
 
-    private func dayHelp(_ point: TokenPlotPoint) -> String {
-        Self.dayHelp(point)
-    }
 
     private func tooltipPosition(cellCenter: CGPoint, labelWidth: CGFloat) -> CGPoint {
         let halfWidth = labelWidth / 2
@@ -2142,12 +2128,6 @@ private func viewportTooltipX(
     return min(max(x, minimum), maximum)
 }
 
-private extension View {
-    func hoverDetail(_ text: String, alignment: Alignment = .top) -> some View {
-        modifier(HoverDetailModifier(text: text, alignment: alignment))
-    }
-}
-
 private struct ChartHoverLabel: View {
     var text: String
     @Environment(\.usageVisualTheme) private var theme
@@ -2168,46 +2148,6 @@ private struct ChartHoverLabel: View {
             }
             .shadow(color: .black.opacity(0.22), radius: 5, x: 0, y: 2)
             .allowsHitTesting(false)
-    }
-}
-
-private struct HoverDetailModifier: ViewModifier {
-    var text: String
-    var alignment: Alignment
-
-    @State private var isHovering = false
-    @State private var showsDetail = false
-    @State private var hoverTask: Task<Void, Never>?
-
-    func body(content: Content) -> some View {
-        content
-            .contentShape(Rectangle())
-            .onHover(perform: updateHover)
-            .overlay(alignment: alignment) {
-                if showsDetail {
-                    ChartHoverLabel(text: text)
-                        .offset(y: -28)
-                }
-            }
-            .zIndex(showsDetail ? 100 : 0)
-            .onDisappear {
-                hoverTask?.cancel()
-                showsDetail = false
-            }
-    }
-
-    private func updateHover(_ hovering: Bool) {
-        isHovering = hovering
-        hoverTask?.cancel()
-        if hovering {
-            hoverTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 80_000_000)
-                guard !Task.isCancelled, isHovering else { return }
-                showsDetail = true
-            }
-        } else {
-            showsDetail = false
-        }
     }
 }
 

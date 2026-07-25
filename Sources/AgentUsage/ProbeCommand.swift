@@ -31,7 +31,7 @@ enum ProbeCommand {
             .map { "\($0.durationLabel) \(DisplayFormatter.percent($0.usedPercent))" }
             .joined(separator: ", ")
         let amount = DisplayFormatter.amountText(snapshot) ?? DisplayFormatter.dollars(0)
-        let amountLabel = snapshot.credits != nil ? "credits" : snapshot.billingCost != nil ? "billing" : "local usage"
+        let amountLabel = snapshot.credits != nil ? "credits" : "local usage"
         let activity = snapshot.codexActivity.map {
             ", activity \(DisplayFormatter.compactTokens($0.lifetimeTokens)) lifetime"
         } ?? ""

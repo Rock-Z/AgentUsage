@@ -12,10 +12,6 @@ enum Provider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .claude: "Claude Code"
         }
     }
-
-    var shortName: String {
-        self.displayName
-    }
 }
 
 enum MenuProviderSelection: String, CaseIterable, Identifiable {
@@ -108,13 +104,6 @@ struct RateWindow: Codable, Equatable, Sendable {
         if remainingMinutes > 0 || parts.isEmpty { parts.append("\(remainingMinutes)m") }
         return parts.joined(separator: " ")
     }
-}
-
-struct CostSnapshot: Codable, Equatable, Sendable {
-    var dollars: Double
-    var since: Date
-    var updatedAt: Date
-    var scannedFiles: Int
 }
 
 struct CreditSnapshot: Codable, Equatable, Sendable {
@@ -238,8 +227,6 @@ struct UsageSnapshot: Codable, Equatable, Sendable {
     var sevenDay: RateWindow?
     var credits: CreditSnapshot? = nil
     var resetCredits: ResetCreditSnapshot? = nil
-    var billingCost: CostSnapshot?
-    var localUsageCost: CostSnapshot?
     var accountEmail: String?
     var plan: String?
     var codexActivity: CodexActivitySnapshot? = nil
@@ -421,109 +408,16 @@ enum DisplayFormatter {
         return formatter.string(from: date)
     }
 
-    static func menuTitle(
-        states: [Provider: ProviderState],
-        providerSelection: MenuProviderSelection,
-        metric: MenuMetric,
-        showUsed: Bool) -> String
-    {
-        switch metric {
-        case .fiveHourPercent, .sevenDayPercent:
-            let window: RateWindow?
-            let prefix: String
-            if let provider = providerSelection.provider {
-                window = self.selectedWindow(
-                    states: states,
-                    providerSelection: providerSelection,
-                    metric: metric)
-                prefix = provider.shortName
-            } else {
-                window = self.selectedWindow(
-                    states: states,
-                    providerSelection: providerSelection,
-                    metric: metric)
-                prefix = "AI"
-            }
-            guard let window else {
-                if let amount = self.fallbackAmountText(
-                    states: states,
-                    providerSelection: providerSelection)
-                {
-                    return "\(prefix) \(amount)"
-                }
-                return "\(prefix) --"
-            }
-            let percent = showUsed ? window.usedPercent : window.remainingPercent
-            return "\(prefix) \(Self.percent(percent))"
-
-        case .bothPercent:
-            let prefix = providerSelection.provider?.shortName ?? "AI"
-            let shortWindow = self.selectedWindow(
-                states: states,
-                providerSelection: providerSelection,
-                metric: .fiveHourPercent)
-            let longWindow = self.selectedWindow(
-                states: states,
-                providerSelection: providerSelection,
-                metric: .sevenDayPercent)
-            let summaries = [shortWindow, longWindow].compactMap { window -> String? in
-                guard let window else { return nil }
-                let value = showUsed ? window.usedPercent : window.remainingPercent
-                return "\(window.durationLabel) \(Self.percent(value))"
-            }
-            if !summaries.isEmpty {
-                return "\(prefix) \(summaries.joined(separator: " · "))"
-            }
-            if let amount = self.fallbackAmountText(
-                states: states,
-                providerSelection: providerSelection)
-            {
-                return "\(prefix) \(amount)"
-            }
-            return "\(prefix) --"
-
-        case .billingDollars:
-            let prefix: String
-            if let provider = providerSelection.provider {
-                prefix = provider.shortName
-                let amount = self.amountText(states[provider]?.snapshot) ?? "--"
-                return "\(prefix) \(amount)"
-            } else {
-                prefix = "AI"
-                let dollars = Provider.allCases.reduce(0) { total, provider in
-                    total + (self.amountDollars(states[provider]?.snapshot) ?? 0)
-                }
-                return "\(prefix) \(Self.dollars(dollars))"
-            }
-        }
-    }
-
     static func amountText(_ snapshot: UsageSnapshot?) -> String? {
-        guard let snapshot else { return nil }
-        if let credits = snapshot.credits {
-            return self.credits(credits)
-        }
-        if let dollars = self.amountDollars(snapshot) {
-            return self.dollars(dollars)
-        }
-        return nil
-    }
-
-    static func amountDollars(_ snapshot: UsageSnapshot?) -> Double? {
-        guard let snapshot else { return nil }
-        return snapshot.billingCost?.dollars ?? snapshot.localUsageCost?.dollars
+        snapshot?.credits.map(self.credits)
     }
 
     static func fallbackAmountText(
         states: [Provider: ProviderState],
         providerSelection: MenuProviderSelection) -> String?
     {
-        if let provider = providerSelection.provider {
-            return self.amountText(states[provider]?.snapshot)
-        }
-        let values = Provider.allCases.compactMap { self.amountDollars(states[$0]?.snapshot) }
-        guard !values.isEmpty else { return nil }
-        return self.dollars(values.reduce(0, +))
+        guard let provider = providerSelection.provider else { return nil }
+        return self.amountText(states[provider]?.snapshot)
     }
 
     static func selectedWindow(
@@ -545,35 +439,20 @@ enum DisplayFormatter {
         return windows.max { $0.usedPercent < $1.usedPercent }
     }
 
-    static func fallbackDollars(
-        states: [Provider: ProviderState],
-        providerSelection: MenuProviderSelection) -> Double?
-    {
-        if let provider = providerSelection.provider {
-            return self.amountDollars(states[provider]?.snapshot)
-        }
-        let values = Provider.allCases.compactMap { self.amountDollars(states[$0]?.snapshot) }
-        guard !values.isEmpty else { return nil }
-        return values.reduce(0, +)
-    }
-
     static func menuPercentText(
         window: RateWindow?,
         innerWindow: RateWindow?,
-        metric: MenuMetric,
-        showUsed: Bool) -> String?
+        metric: MenuMetric) -> String?
     {
         guard metric != .billingDollars else { return nil }
         if metric == .bothPercent {
             let lines = [window, innerWindow].compactMap { rateWindow -> String? in
                 guard let rateWindow else { return nil }
-                let value = showUsed ? rateWindow.usedPercent : rateWindow.remainingPercent
-                return "\(rateWindow.durationLabel): \(Self.percent(value))"
+                return "\(rateWindow.durationLabel): \(Self.percent(rateWindow.remainingPercent))"
             }
             return lines.isEmpty ? nil : lines.joined(separator: "\n")
         }
         guard let window else { return nil }
-        let percent = showUsed ? window.usedPercent : window.remainingPercent
-        return Self.percent(percent)
+        return Self.percent(window.remainingPercent)
     }
 }
