@@ -70,7 +70,7 @@ jobs:
               | awk '/"AgentUsage Code Signing"/ { print $2; exit }'
           )"
           test -n "$signing_identity"
-          echo "AGENTUSAGE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+          echo "AGENTUSAGE_SIGNING_IDENTITY=AgentUsage Code Signing" >> "$GITHUB_ENV"
           echo "AGENTUSAGE_SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
 
       - name: Build universal app
