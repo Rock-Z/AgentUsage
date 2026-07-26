@@ -66,7 +66,7 @@ jobs:
           mkdir -p "$appcast_root"
           cp dist/AgentUsage-macos-universal.dmg "$appcast_root/"
           printf '%s' "$SPARKLE_ED_PRIVATE_KEY" \
-            | .build/artifacts/sparkle/Sparkle/bin/generate_appcast \
+            | .build/arm64/artifacts/sparkle/Sparkle/bin/generate_appcast \
                 --ed-key-file - \
                 --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/" \
                 --maximum-deltas 0 \
