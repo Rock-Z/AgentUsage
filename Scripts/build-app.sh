@@ -9,6 +9,7 @@ CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
+HELPERS_DIR="$CONTENTS_DIR/Helpers"
 ICON_SOURCE="$ROOT_DIR/Assets/AgentUsage.icns"
 
 cd "$ROOT_DIR"
@@ -24,6 +25,19 @@ if [[ ! -x "$EXECUTABLE" ]]; then
   exit 1
 fi
 
+if [[ -n "${AGENTUSAGE_CLAUDE_HELPER:-}" ]]; then
+  CLAUDE_HELPER="$AGENTUSAGE_CLAUDE_HELPER"
+elif [[ -x "$(dirname "$EXECUTABLE")/AgentUsageClaudeHelper" ]]; then
+  CLAUDE_HELPER="$(dirname "$EXECUTABLE")/AgentUsageClaudeHelper"
+else
+  swift build -c "$CONFIGURATION" --product AgentUsageClaudeHelper
+  CLAUDE_HELPER="$ROOT_DIR/.build/$CONFIGURATION/AgentUsageClaudeHelper"
+fi
+if [[ ! -x "$CLAUDE_HELPER" ]]; then
+  echo "Claude credential helper not found: $CLAUDE_HELPER" >&2
+  exit 1
+fi
+
 if [[ -n "${AGENTUSAGE_SPARKLE_FRAMEWORK:-}" ]]; then
   SPARKLE_FRAMEWORK="$AGENTUSAGE_SPARKLE_FRAMEWORK"
 else
@@ -35,8 +49,9 @@ if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
 fi
 
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$FRAMEWORKS_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$FRAMEWORKS_DIR" "$HELPERS_DIR"
 cp "$EXECUTABLE" "$MACOS_DIR/$APP_NAME"
+cp "$CLAUDE_HELPER" "$HELPERS_DIR/AgentUsageClaudeHelper"
 if ! otool -l "$MACOS_DIR/$APP_NAME" \
   | grep -F "@executable_path/../Frameworks" >/dev/null
 then
@@ -72,9 +87,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.4.2</string>
+  <string>0.4.3</string>
   <key>CFBundleVersion</key>
-  <string>8</string>
+  <string>9</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>LSUIElement</key>

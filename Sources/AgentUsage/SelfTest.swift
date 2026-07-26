@@ -15,12 +15,14 @@ enum SelfTest {
     static func run() throws {
         try testCreditFormatting()
         try testClaudeOAuthUsageParserReadsWindows()
-        try testClaudeOAuthCredentialParserReadsClaudeCodeShape()
+        try testClaudeCredentialHelperFraming()
         try testDurationLabelsAndCodexWindowClassification()
         try testCodexAccountUsageParsingAndFormatting()
         try testPreferredAxisMaximums()
         try testMenuProviderSelectionFollowsSingleTrackedProvider()
         try testMenuMetricLabelsAreProviderIndependent()
+        try testFirstLaunchSettingsFollowAvailableProviders()
+        try testChartPositionsDefaultLatestAndPersistIndependently()
         try testUpdateActionTitles()
         try testWeeklyActivityUsesMondayThroughSundayBuckets()
         try testPartialDualLimitFormatting()
@@ -52,15 +54,18 @@ enum SelfTest {
         try expect(snapshot.updatedAt == updatedAt, "expected supplied OAuth update time")
     }
 
-    private static func testClaudeOAuthCredentialParserReadsClaudeCodeShape() throws {
-        let data = Data(#"{"claudeAiOauth":{"accessToken":"token","expiresAt":1800000000000,"subscriptionType":"pro"}}"#.utf8)
-        let credentials = ClaudeOAuthCredentialReader.parse(data)
+    private static func testClaudeCredentialHelperFraming() throws {
+        let body = Data(#"{"five_hour":{"utilization":12.5}}"#.utf8)
+        var output = Data("200\n120\npro\n".utf8)
+        output.append(body)
+        let response = try ClaudeCredentialHelper.parse(output)
 
-        try expect(credentials?.accessToken == "token", "expected Claude OAuth access token")
-        try expect(credentials?.subscriptionType == "pro", "expected Claude OAuth subscription type")
+        try expect(response.statusCode == 200, "expected helper HTTP status")
+        try expect(response.retryAfter == "120", "expected helper retry header")
         try expect(
-            credentials?.expiresAt == Date(timeIntervalSince1970: 1_800_000_000),
-            "expected millisecond OAuth expiration")
+            response.subscriptionType == "pro",
+            "expected helper subscription type")
+        try expect(response.body == body, "expected helper body bytes to remain unchanged")
     }
 
     private static func testDurationLabelsAndCodexWindowClassification() throws {
@@ -160,6 +165,96 @@ enum SelfTest {
         try expect(MenuMetric.sevenDayPercent.label == "7d%", "expected fixed 7d metric label")
         try expect(MenuMetric.bothPercent.label == "All limits", "expected fixed all-limits label")
         try expect(MenuMetric.billingDollars.label == "Billing $", "expected fixed billing label")
+    }
+
+    private static func testFirstLaunchSettingsFollowAvailableProviders() throws {
+        let suiteName = "AgentUsage.SelfTest.FirstLaunch.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw Failure.expectation("expected isolated first-launch defaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        FirstLaunchSettings.applyIfNeeded(
+            defaults: defaults,
+            availableProviders: [.claude],
+            hasLaunchedBefore: false)
+        try expect(!defaults.bool(forKey: "trackCodex"), "expected unavailable Codex off")
+        try expect(defaults.bool(forKey: "trackClaude"), "expected available Claude on")
+        try expect(
+            defaults.string(forKey: "menuProvider")
+                == MenuProviderSelection.claude.rawValue,
+            "expected Claude menu default")
+        try expect(
+            defaults.string(forKey: "menuMetric")
+                == MenuMetric.bothPercent.rawValue,
+            "expected all-limits metric default")
+        try expect(
+            defaults.string(forKey: "menuDisplayMode")
+                == MenuDisplayMode.ringAndPercentage.rawValue,
+            "expected ring and percentage default")
+
+        FirstLaunchSettings.applyIfNeeded(
+            defaults: defaults,
+            availableProviders: [.codex],
+            hasLaunchedBefore: false)
+        try expect(
+            defaults.string(forKey: "menuProvider")
+                == MenuProviderSelection.claude.rawValue,
+            "expected first-launch settings to apply only once")
+
+        let existingSuiteName =
+            "AgentUsage.SelfTest.ExistingSettings.\(UUID().uuidString)"
+        guard let existingDefaults = UserDefaults(suiteName: existingSuiteName) else {
+            throw Failure.expectation("expected isolated existing-user defaults")
+        }
+        defer {
+            existingDefaults.removePersistentDomain(forName: existingSuiteName)
+        }
+        existingDefaults.set(
+            MenuMetric.fiveHourPercent.rawValue,
+            forKey: "menuMetric")
+        FirstLaunchSettings.applyIfNeeded(
+            defaults: existingDefaults,
+            availableProviders: [.claude],
+            hasLaunchedBefore: true)
+        try expect(
+            existingDefaults.string(forKey: "menuMetric")
+                == MenuMetric.fiveHourPercent.rawValue,
+            "expected existing user settings to remain unchanged")
+    }
+
+    private static func testChartPositionsDefaultLatestAndPersistIndependently() throws {
+        let suiteName = "AgentUsage.SelfTest.ChartPosition.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw Failure.expectation("expected isolated chart-position defaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let persistence = ChartPositionPersistence(
+            defaults: defaults,
+            keyPrefix: "testChartPosition")
+        let dates = [
+            Date(timeIntervalSince1970: 100),
+            Date(timeIntervalSince1970: 200),
+            Date(timeIntervalSince1970: 300),
+        ]
+        try expect(
+            persistence.restoredPosition(for: "daily", availableDates: dates)
+                == dates[2],
+            "expected a new chart to end on its latest period")
+
+        persistence.save(dates[1], for: "daily")
+        try expect(
+            ChartPositionPersistence(
+                defaults: defaults,
+                keyPrefix: "testChartPosition")
+                .restoredPosition(for: "daily", availableDates: dates)
+                == dates[1],
+            "expected daily position to persist across chart instances")
+        try expect(
+            persistence.restoredPosition(for: "weekly", availableDates: dates)
+                == dates[2],
+            "expected weekly position to remain independently latest")
     }
 
     private static func testUpdateActionTitles() throws {

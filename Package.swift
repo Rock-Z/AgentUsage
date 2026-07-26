@@ -8,6 +8,9 @@ let package = Package(
     ],
     products: [
         .executable(name: "AgentUsage", targets: ["AgentUsage"]),
+        .executable(
+            name: "AgentUsageClaudeHelper",
+            targets: ["AgentUsageClaudeHelper"]),
     ],
     dependencies: [
         .package(
@@ -20,4 +23,6 @@ let package = Package(
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle"),
             ]),
+        .executableTarget(
+            name: "AgentUsageClaudeHelper"),
     ])

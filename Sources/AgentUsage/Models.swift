@@ -90,6 +90,96 @@ enum MenuDisplayMode: String, CaseIterable, Identifiable {
     }
 }
 
+struct FirstLaunchSettings {
+    private static let initializedKey = "initialSettingsVersion"
+    private static let currentVersion = 1
+
+    static func applyIfNeeded(
+        defaults: UserDefaults,
+        availableProviders: [Provider],
+        hasLaunchedBefore: Bool
+    ) {
+        guard defaults.integer(forKey: initializedKey) < currentVersion else {
+            return
+        }
+        defaults.set(currentVersion, forKey: initializedKey)
+        guard !hasLaunchedBefore else { return }
+
+        let providers = Set(availableProviders)
+        defaults.set(providers.contains(.codex), forKey: "trackCodex")
+        defaults.set(providers.contains(.claude), forKey: "trackClaude")
+
+        let selection: MenuProviderSelection = switch (
+            providers.contains(.codex),
+            providers.contains(.claude)
+        ) {
+        case (true, true): .combined
+        case (true, false): .codex
+        case (false, true): .claude
+        case (false, false): .combined
+        }
+        defaults.set(selection.rawValue, forKey: "menuProvider")
+        defaults.set(MenuMetric.bothPercent.rawValue, forKey: "menuMetric")
+        defaults.set(
+            MenuDisplayMode.ringAndPercentage.rawValue,
+            forKey: "menuDisplayMode")
+    }
+
+    static func locallyAvailableProviders(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [Provider] {
+        Provider.allCases.filter { provider in
+            switch provider {
+            case .codex:
+                BinaryLocator.resolve("codex", env: environment) != nil
+            case .claude:
+                BinaryLocator.resolve("claude", env: environment) != nil
+            }
+        }
+    }
+}
+
+struct ChartPositionPersistence {
+    private let defaults: UserDefaults
+    private let keyPrefix: String
+
+    init(
+        defaults: UserDefaults = .standard,
+        keyPrefix: String = "codexActivityScrollPosition"
+    ) {
+        self.defaults = defaults
+        self.keyPrefix = keyPrefix
+    }
+
+    func restoredPosition(
+        for period: String,
+        availableDates: [Date]
+    ) -> Date? {
+        guard let latest = availableDates.last else { return nil }
+        guard let timestamp = defaults.object(
+            forKey: key(for: period)) as? Double
+        else { return latest }
+
+        let saved = Date(timeIntervalSince1970: timestamp)
+        return availableDates.min {
+            abs($0.timeIntervalSince(saved)) < abs($1.timeIntervalSince(saved))
+        }
+    }
+
+    func save(_ date: Date?, for period: String) {
+        let key = key(for: period)
+        guard let date else {
+            defaults.removeObject(forKey: key)
+            return
+        }
+        defaults.set(date.timeIntervalSince1970, forKey: key)
+    }
+
+    private func key(for period: String) -> String {
+        "\(keyPrefix).\(period)"
+    }
+}
+
 struct RateWindow: Codable, Equatable, Sendable {
     var usedPercent: Double
     var windowMinutes: Int?

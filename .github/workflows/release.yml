@@ -22,24 +22,86 @@ jobs:
           test "${GITHUB_REF_NAME#v}" = "$plist_version"
           test -f "Docs/releases/$GITHUB_REF_NAME.md"
 
+      - name: Import persistent code-signing identity
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.AGENTUSAGE_SIGNING_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.AGENTUSAGE_SIGNING_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CERTIFICATE_P12_BASE64"
+          test -n "$CERTIFICATE_PASSWORD"
+
+          certificate_path="$RUNNER_TEMP/AgentUsage-Code-Signing.p12"
+          certificate_pem="$RUNNER_TEMP/AgentUsage-Code-Signing.pem"
+          keychain_path="$RUNNER_TEMP/AgentUsage-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+
+          printf '%s' "$CERTIFICATE_P12_BASE64" | base64 --decode > "$certificate_path"
+          openssl pkcs12 \
+            -in "$certificate_path" \
+            -clcerts \
+            -nokeys \
+            -passin env:CERTIFICATE_PASSWORD \
+            -out "$certificate_pem"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          sudo security add-trusted-cert \
+            -d \
+            -r trustRoot \
+            -p codeSign \
+            -k /Library/Keychains/System.keychain \
+            "$certificate_pem"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+          signing_identity="$(
+            security find-identity -v -p codesigning "$keychain_path" \
+              | awk '/"AgentUsage Code Signing"/ { print $2; exit }'
+          )"
+          test -n "$signing_identity"
+          echo "AGENTUSAGE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+          echo "AGENTUSAGE_SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
+
       - name: Build universal app
         shell: bash
         run: |
           set -euo pipefail
-          swift build -c release --triple arm64-apple-macosx14.0 --scratch-path .build/arm64
-          swift build -c release --triple x86_64-apple-macosx14.0 --scratch-path .build/x86_64
+          swift build -c release --product AgentUsage \
+            --triple arm64-apple-macosx14.0 --scratch-path .build/arm64
+          swift build -c release --product AgentUsageClaudeHelper \
+            --triple arm64-apple-macosx14.0 --scratch-path .build/arm64
+          swift build -c release --product AgentUsage \
+            --triple x86_64-apple-macosx14.0 --scratch-path .build/x86_64
+          swift build -c release --product AgentUsageClaudeHelper \
+            --triple x86_64-apple-macosx14.0 --scratch-path .build/x86_64
           mkdir -p .build/universal
           lipo -create \
             .build/arm64/arm64-apple-macosx/release/AgentUsage \
             .build/x86_64/x86_64-apple-macosx/release/AgentUsage \
             -output .build/universal/AgentUsage
+          lipo -create \
+            .build/arm64/arm64-apple-macosx/release/AgentUsageClaudeHelper \
+            .build/x86_64/x86_64-apple-macosx/release/AgentUsageClaudeHelper \
+            -output .build/universal/AgentUsageClaudeHelper
           AGENTUSAGE_EXECUTABLE="$PWD/.build/universal/AgentUsage" \
+            AGENTUSAGE_CLAUDE_HELPER="$PWD/.build/universal/AgentUsageClaudeHelper" \
             AGENTUSAGE_SPARKLE_FRAMEWORK="$PWD/.build/arm64/arm64-apple-macosx/release/Sparkle.framework" \
             ./Scripts/build-app.sh
 
       - name: Verify app bundle
         shell: bash
-        run: codesign --verify --deep --strict --verbose=2 .build/release/AgentUsage.app
+        run: ./Scripts/verify-app.sh .build/release/AgentUsage.app
 
       - name: Package release
         env:
@@ -95,3 +157,14 @@ jobs:
             --verify-tag \
             --notes-file "Docs/releases/$GITHUB_REF_NAME.md" \
             --title "AgentUsage $GITHUB_REF_NAME"
+
+      - name: Remove temporary signing keychain
+        if: always()
+        shell: bash
+        run: |
+          sudo security delete-certificate \
+            -c "AgentUsage Code Signing" \
+            /Library/Keychains/System.keychain >/dev/null 2>&1 || true
+          if [[ -n "${AGENTUSAGE_SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$AGENTUSAGE_SIGNING_KEYCHAIN" || true
+          fi

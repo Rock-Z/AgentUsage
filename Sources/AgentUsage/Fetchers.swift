@@ -553,76 +553,14 @@ private final class CodexRPCClient: @unchecked Sendable {
 
 struct ClaudeUsageFetcher: UsageFetching {
     func fetch() async throws -> UsageSnapshot {
-        guard let credentials = ClaudeOAuthCredentialReader.loadFromKeychain() else {
-            throw FetchError.malformed(
-                "Claude OAuth credentials could not be read from Keychain")
-        }
-        guard !credentials.isExpired else {
-            throw FetchError.malformed(
-                "Claude OAuth credentials in Keychain have expired")
-        }
-        return try await ClaudeOAuthUsageFetcher.fetch(credentials: credentials)
-    }
-}
-
-struct ClaudeOAuthCredentials: Sendable {
-    var accessToken: String
-    var expiresAt: Date?
-    var subscriptionType: String?
-
-    var isExpired: Bool {
-        expiresAt.map { Date() >= $0 } ?? false
-    }
-}
-
-enum ClaudeOAuthCredentialReader {
-    private static let keychainService = "Claude Code-credentials"
-
-    static func loadFromKeychain() -> ClaudeOAuthCredentials? {
-        #if canImport(Security)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data
-        else { return nil }
-        return parse(data)
-        #else
-        return nil
-        #endif
-    }
-
-    static func parse(_ data: Data) -> ClaudeOAuthCredentials? {
-        struct Root: Decodable {
-            struct OAuth: Decodable {
-                var accessToken: String?
-                var expiresAt: Double?
-                var subscriptionType: String?
-            }
-            var claudeAiOauth: OAuth?
-        }
-
-        guard let root = try? JSONDecoder().decode(Root.self, from: data),
-              let oauth = root.claudeAiOauth,
-              let token = oauth.accessToken?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !token.isEmpty
-        else { return nil }
-        return ClaudeOAuthCredentials(
-            accessToken: token,
-            expiresAt: oauth.expiresAt.map { Date(timeIntervalSince1970: $0 / 1_000) },
-            subscriptionType: oauth.subscriptionType)
+        try await ClaudeOAuthUsageFetcher.fetch()
     }
 }
 
 enum ClaudeOAuthUsageFetcher {
-    private static let endpoint = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private static let gate = ClaudeOAuthUsageRateLimitGate()
 
-    static func fetch(credentials: ClaudeOAuthCredentials) async throws -> UsageSnapshot {
+    static func fetch() async throws -> UsageSnapshot {
         switch await gate.decision() {
         case let .cached(snapshot):
             return snapshot
@@ -632,31 +570,25 @@ enum ClaudeOAuthUsageFetcher {
             break
         }
 
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 8
-        request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        request.setValue("claude-code/2.1.0", forHTTPHeaderField: "User-Agent")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw FetchError.malformed("missing Claude OAuth HTTP response")
-        }
-        if http.statusCode == 429 {
-            let retryAfter = retryAfterDate(from: http)
+        let response = try await ClaudeCredentialHelper.fetch()
+        if response.statusCode == 429 {
+            let retryAfter = retryAfterDate(from: response.retryAfter)
             if let cached = await gate.recordRateLimit(retryAfter: retryAfter) {
                 return cached
             }
             throw ClaudeOAuthFetchError.rateLimited(
                 until: await gate.currentBlockedUntil())
         }
-        guard http.statusCode == 200 else {
-            throw FetchError.malformed("Claude OAuth returned HTTP \(http.statusCode)")
+        if response.statusCode == 401 {
+            throw ClaudeOAuthFetchError.unauthorized
         }
-        let snapshot = try snapshot(from: data, subscriptionType: credentials.subscriptionType)
+        guard response.statusCode == 200 else {
+            throw FetchError.malformed(
+                "Claude OAuth returned HTTP \(response.statusCode)")
+        }
+        let snapshot = try snapshot(
+            from: response.body,
+            subscriptionType: response.subscriptionType)
         await gate.recordSuccess(snapshot)
         return snapshot
     }
@@ -715,8 +647,11 @@ enum ClaudeOAuthUsageFetcher {
         return formatter.date(from: value)
     }
 
-    private static func retryAfterDate(from response: HTTPURLResponse, now: Date = Date()) -> Date? {
-        guard let value = response.value(forHTTPHeaderField: "Retry-After")?
+    private static func retryAfterDate(
+        from header: String?,
+        now: Date = Date()
+    ) -> Date? {
+        guard let value = header?
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !value.isEmpty
         else { return nil }
@@ -778,10 +713,13 @@ enum ClaudeOAuthUsageFetcher {
 }
 
 private enum ClaudeOAuthFetchError: LocalizedError {
+    case unauthorized
     case rateLimited(until: Date?)
 
     var errorDescription: String? {
         switch self {
+        case .unauthorized:
+            return "Claude OAuth authorization expired. Open Claude Code to refresh its sign-in."
         case let .rateLimited(until):
             if let until {
                 return "Claude usage is rate limited; retrying after \(DisplayFormatter.rateLimitResetDate(until))."

@@ -107,7 +107,25 @@ final class UsageStore: ObservableObject {
         Provider.allCases.filter { isTracking($0) }
     }
 
+    var enabledProviderSelection: MenuProviderSelection {
+        switch (trackCodex, trackClaude) {
+        case (true, true):
+            .combined
+        case (true, false):
+            .codex
+        case (false, true):
+            .claude
+        case (false, false):
+            .combined
+        }
+    }
+
     init(fetchers: [Provider: any UsageFetching]? = nil) {
+        let defaults = UserDefaults.standard
+        FirstLaunchSettings.applyIfNeeded(
+            defaults: defaults,
+            availableProviders: FirstLaunchSettings.locallyAvailableProviders(),
+            hasLaunchedBefore: defaults.bool(forKey: "SUHasLaunchedBefore"))
         self.fetchers = fetchers ?? [
             .codex: CodexUsageFetcher(),
             .claude: ClaudeUsageFetcher(),
@@ -161,20 +179,21 @@ final class UsageStore: ObservableObject {
         }
     }
 
-    func setTracking(_ provider: Provider, enabled: Bool) {
-        switch provider {
-        case .codex:
-            trackCodex = enabled
-        case .claude:
-            trackClaude = enabled
-        }
+    func setEnabledProviders(_ selection: MenuProviderSelection) {
+        let previouslyTracked = Set(trackedProviders)
+        trackCodex = selection == .codex || selection == .combined
+        trackClaude = selection == .claude || selection == .combined
 
         menuProvider = menuProvider.constrained(to: trackedProviders)
 
-        if enabled {
-            refresh(provider: provider)
-        } else {
-            states[provider] = ProviderState()
+        for provider in Provider.allCases {
+            if isTracking(provider) {
+                if !previouslyTracked.contains(provider) {
+                    refresh(provider: provider)
+                }
+            } else {
+                states[provider] = ProviderState()
+            }
         }
     }
 
@@ -323,21 +342,19 @@ struct MenuContentView: View {
         VStack(alignment: .leading, spacing: 4) {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
                 GridRow {
-                    Text("Track")
+                    Text("Enable")
                         .foregroundStyle(visualTheme.textColor)
                         .frame(width: Self.footerLabelWidth, alignment: .leading)
-                    HStack(spacing: 12) {
-                        ForEach(Provider.allCases) { provider in
-                            Toggle(provider.displayName, isOn: Binding(
-                                get: { store.isTracking(provider) },
-                                set: { store.setTracking(provider, enabled: $0) }))
-                                .toggleStyle(.checkbox)
-                        }
-                    }
-                    .frame(width: Self.footerControlWidth, alignment: .leading)
+                    NativeSegmentedPicker(
+                        selection: Binding(
+                            get: { store.enabledProviderSelection },
+                            set: { store.setEnabledProviders($0) }),
+                        options: MenuProviderSelection.allCases,
+                        label: \.label)
+                        .frame(width: Self.footerControlWidth)
                 }
                 GridRow {
-                    Text("Menu")
+                    Text("Show")
                         .foregroundStyle(visualTheme.textColor)
                         .frame(width: Self.footerLabelWidth, alignment: .leading)
                     NativeSegmentedPicker(
@@ -1418,16 +1435,31 @@ private struct HeatmapMetrics {
 
 private struct TokenDailyHeatmap: View {
     private let model: HeatmapModel
-    @State private var scrollTarget: String?
+    private let targetDates: [Date]
+    private let positionPersistence: ChartPositionPersistence
+    @State private var scrollTarget: Date?
     @State private var viewport = ChartViewport()
     @State private var legendHidden = false
     @State private var scrollIndicatorVisible = false
     @State private var legendRevealTask: Task<Void, Never>?
     @Environment(\.usageVisualTheme) private var theme
 
-    init(days: [TokenUsageDay]) {
-        model = HeatmapModel(days: days)
-        _scrollTarget = State(initialValue: "heatmap-latest")
+    init(
+        days: [TokenUsageDay],
+        positionPersistence: ChartPositionPersistence =
+            ChartPositionPersistence()
+    ) {
+        let model = HeatmapModel(days: days)
+        let targetDates = (0..<model.weekCount).map { week in
+            min(model.points[min(week * 7 + 6, model.points.count - 1)].date,
+                model.latestDate)
+        }
+        self.model = model
+        self.targetDates = targetDates
+        self.positionPersistence = positionPersistence
+        _scrollTarget = State(initialValue: positionPersistence.restoredPosition(
+            for: CodexActivityPeriod.daily.id,
+            availableDates: targetDates))
     }
 
     var body: some View {
@@ -1502,6 +1534,17 @@ private struct TokenDailyHeatmap: View {
                                     plotSize: CGSize(
                                         width: metrics.contentWidth,
                                         height: ChartLayout.plotHeight))
+                                HStack(spacing: metrics.columnSpacing) {
+                                    ForEach(targetDates, id: \.self) { date in
+                                        Color.clear
+                                            .frame(
+                                                width: metrics.cellSize,
+                                                height: 1)
+                                            .id(date)
+                                    }
+                                }
+                                .scrollTargetLayout()
+                                .allowsHitTesting(false)
                             }
                             .frame(width: metrics.contentWidth, height: ChartLayout.plotHeight)
                             .padding(.vertical, heatmapHoverBleed)
@@ -1509,11 +1552,7 @@ private struct TokenDailyHeatmap: View {
                                 width: metrics.contentWidth,
                                 height: ChartLayout.plotHeight + heatmapHoverBleed * 2)
                             .frame(height: ChartLayout.timelineHeight, alignment: .top)
-                            Color.clear
-                                .frame(width: 1, height: 1)
-                                .id("heatmap-latest")
                         }
-                        .scrollTargetLayout()
                     }
                     .defaultScrollAnchor(.trailing)
                     .scrollIndicators(.hidden)
@@ -1545,6 +1584,11 @@ private struct TokenDailyHeatmap: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Daily token activity")
+        .onChange(of: scrollTarget) { _, newValue in
+            positionPersistence.save(
+                newValue,
+                for: CodexActivityPeriod.daily.id)
+        }
         .onDisappear {
             legendRevealTask?.cancel()
         }
@@ -1766,12 +1810,26 @@ private struct HeatmapHoverOverlay: View {
 
 private struct TokenWeeklyBars: View {
     var buckets: [TokenWeekBucket]
+    private let positionPersistence: ChartPositionPersistence
+    @State private var scrollTarget: Date?
     @State private var hoveredIndex: Int?
     @State private var viewport = ChartViewport()
     @State private var legendHidden = false
     @State private var scrollIndicatorVisible = false
     @State private var legendRevealTask: Task<Void, Never>?
     @Environment(\.usageVisualTheme) private var theme
+
+    init(
+        buckets: [TokenWeekBucket],
+        positionPersistence: ChartPositionPersistence =
+            ChartPositionPersistence()
+    ) {
+        self.buckets = buckets
+        self.positionPersistence = positionPersistence
+        _scrollTarget = State(initialValue: positionPersistence.restoredPosition(
+            for: CodexActivityPeriod.weekly.id,
+            availableDates: buckets.map(\.startDate)))
+    }
 
     var body: some View {
         let range = visibleIndexRange(
@@ -1815,14 +1873,13 @@ private struct TokenWeeklyBars: View {
                     : contentWidth / CGFloat(buckets.count)
 
                 ZStack(alignment: .bottom) {
-                    ScrollViewReader { scrollProxy in
-                        ScrollView(.horizontal) {
-                            HStack(spacing: 0) {
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 0) {
                             HStack(spacing: 0) {
                                 ForEach(buckets.indices, id: \.self) { index in
                                     Color.clear
                                         .frame(width: columnWidth, height: 1)
-                                        .id("weekly-\(index)")
+                                        .id(buckets[index].startDate)
                                 }
                             }
                             .scrollTargetLayout()
@@ -1892,24 +1949,16 @@ private struct TokenWeeklyBars: View {
                                 }
                             }
                             .frame(height: ChartLayout.timelineHeight, alignment: .top)
-                            Color.clear
-                                .frame(width: 1, height: 1)
-                                .id("weekly-latest")
-                            }
-                        }
-                        .defaultScrollAnchor(.trailing)
-                        .scrollIndicators(.hidden)
-                        .scrollTargetBehavior(CellSnapScrollTargetBehavior(step: columnWidth))
-                        .trackChartScroll(
-                            viewport: $viewport,
-                            unitWidth: columnWidth,
-                            phaseChanged: updateScrollPhase)
-                        .onAppear {
-                            DispatchQueue.main.async {
-                                scrollProxy.scrollTo("weekly-latest", anchor: .trailing)
-                            }
                         }
                     }
+                    .defaultScrollAnchor(.trailing)
+                    .scrollIndicators(.hidden)
+                    .scrollPosition(id: $scrollTarget, anchor: .trailing)
+                    .scrollTargetBehavior(CellSnapScrollTargetBehavior(step: columnWidth))
+                    .trackChartScroll(
+                        viewport: $viewport,
+                        unitWidth: columnWidth,
+                        phaseChanged: updateScrollPhase)
 
                     ChartScrollIndicator(
                         viewport: viewport,
@@ -1922,6 +1971,11 @@ private struct TokenWeeklyBars: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Weekly token activity")
+        .onChange(of: scrollTarget) { _, newValue in
+            positionPersistence.save(
+                newValue,
+                for: CodexActivityPeriod.weekly.id)
+        }
         .onDisappear {
             legendRevealTask?.cancel()
         }
@@ -1965,23 +2019,34 @@ private struct TokenWeeklyBars: View {
 
 private struct TokenCumulativeLine: View {
     private let points: [TokenPlotPoint]
+    private let positionPersistence: ChartPositionPersistence
     @State private var hoverLocation: CGPoint?
-    @State private var scrollTarget: String?
+    @State private var scrollTarget: Date?
     @State private var viewport = ChartViewport()
     @State private var legendHidden = false
     @State private var scrollIndicatorVisible = false
     @State private var legendRevealTask: Task<Void, Never>?
     @Environment(\.usageVisualTheme) private var theme
 
-    init(days: [TokenUsageDay]) {
+    init(
+        days: [TokenUsageDay],
+        positionPersistence: ChartPositionPersistence =
+            ChartPositionPersistence()
+    ) {
         var total: Int64 = 0
-        points = days.sorted { $0.startDate < $1.startDate }.compactMap { day in
+        let points: [TokenPlotPoint] = days
+            .sorted { $0.startDate < $1.startDate }
+            .compactMap { day in
             guard let date = day.date else { return nil }
             total += day.tokens
             return TokenPlotPoint(date: date, tokens: total)
-        }
+            }
+        self.points = points
+        self.positionPersistence = positionPersistence
         _hoverLocation = State(initialValue: nil)
-        _scrollTarget = State(initialValue: "cumulative-latest")
+        _scrollTarget = State(initialValue: positionPersistence.restoredPosition(
+            for: CodexActivityPeriod.cumulative.id,
+            availableDates: points.map(\.date)))
     }
 
     var body: some View {
@@ -2072,6 +2137,19 @@ private struct TokenCumulativeLine: View {
                                                 contentWidth: contentWidth),
                                             y: 12)
                                 }
+
+                                HStack(spacing: 0) {
+                                    ForEach(points) { point in
+                                        Color.clear
+                                            .frame(
+                                                width: contentWidth
+                                                    / CGFloat(max(1, points.count)),
+                                                height: 1)
+                                            .id(point.date)
+                                    }
+                                }
+                                .scrollTargetLayout()
+                                .allowsHitTesting(false)
                             }
                             .frame(width: contentWidth, height: ChartLayout.plotHeight)
                             .contentShape(Rectangle())
@@ -2084,9 +2162,6 @@ private struct TokenCumulativeLine: View {
                                 }
                             }
                             .frame(height: ChartLayout.timelineHeight, alignment: .top)
-                            Color.clear
-                                .frame(width: 1, height: 1)
-                                .id("cumulative-latest")
                         }
                     }
                     .defaultScrollAnchor(.trailing)
@@ -2108,6 +2183,11 @@ private struct TokenCumulativeLine: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Cumulative token activity")
+        .onChange(of: scrollTarget) { _, newValue in
+            positionPersistence.save(
+                newValue,
+                for: CodexActivityPeriod.cumulative.id)
+        }
         .onDisappear {
             legendRevealTask?.cancel()
         }
