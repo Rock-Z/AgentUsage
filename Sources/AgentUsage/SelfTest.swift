@@ -20,6 +20,7 @@ enum SelfTest {
         try testCodexAccountUsageParsingAndFormatting()
         try testPreferredAxisMaximums()
         try testMenuProviderSelectionFollowsSingleTrackedProvider()
+        try testMenuMetricLabelsAreProviderIndependent()
         try testUpdateActionTitles()
         try testWeeklyActivityUsesMondayThroughSundayBuckets()
         try testPartialDualLimitFormatting()
@@ -135,6 +136,15 @@ enum SelfTest {
 
     private static func testMenuProviderSelectionFollowsSingleTrackedProvider() throws {
         try expect(
+            !MenuProviderSelection.combined.isAvailable(with: [.codex]),
+            "expected Both to be unavailable when Claude is not tracked")
+        try expect(
+            !MenuProviderSelection.combined.isAvailable(with: [.claude]),
+            "expected Both to be unavailable when Codex is not tracked")
+        try expect(
+            MenuProviderSelection.combined.isAvailable(with: [.codex, .claude]),
+            "expected Both to be available when both providers are tracked")
+        try expect(
             MenuProviderSelection.combined.constrained(to: [.codex]) == .codex,
             "expected Both to become Codex when only Codex is tracked")
         try expect(
@@ -143,6 +153,13 @@ enum SelfTest {
         try expect(
             MenuProviderSelection.combined.constrained(to: [.codex, .claude]) == .combined,
             "expected Both to remain available when both providers are tracked")
+    }
+
+    private static func testMenuMetricLabelsAreProviderIndependent() throws {
+        try expect(MenuMetric.fiveHourPercent.label == "5h%", "expected fixed 5h metric label")
+        try expect(MenuMetric.sevenDayPercent.label == "7d%", "expected fixed 7d metric label")
+        try expect(MenuMetric.bothPercent.label == "All limits", "expected fixed all-limits label")
+        try expect(MenuMetric.billingDollars.label == "Billing $", "expected fixed billing label")
     }
 
     private static func testUpdateActionTitles() throws {

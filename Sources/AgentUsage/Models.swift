@@ -37,10 +37,21 @@ enum MenuProviderSelection: String, CaseIterable, Identifiable {
         }
     }
 
-    func constrained(to trackedProviders: [Provider]) -> MenuProviderSelection {
-        guard trackedProviders.count == 1, let provider = trackedProviders.first else {
-            return self
+    func isAvailable(with trackedProviders: [Provider]) -> Bool {
+        switch self {
+        case .codex:
+            trackedProviders.contains(.codex)
+        case .claude:
+            trackedProviders.contains(.claude)
+        case .combined:
+            Provider.allCases.allSatisfy(trackedProviders.contains)
         }
+    }
+
+    func constrained(to trackedProviders: [Provider]) -> MenuProviderSelection {
+        guard !isAvailable(with: trackedProviders),
+              let provider = trackedProviders.first
+        else { return self }
         return provider == .codex ? .codex : .claude
     }
 }
@@ -55,8 +66,8 @@ enum MenuMetric: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .fiveHourPercent: "Short %"
-        case .sevenDayPercent: "Long %"
+        case .fiveHourPercent: "5h%"
+        case .sevenDayPercent: "7d%"
         case .bothPercent: "All limits"
         case .billingDollars: "Billing $"
         }

@@ -103,27 +103,6 @@ final class UsageStore: ObservableObject {
             metric: menuMetric)
     }
 
-    func menuMetricLabel(_ metric: MenuMetric) -> String {
-        switch metric {
-        case .fiveHourPercent:
-            let window = DisplayFormatter.selectedWindow(
-                states: states,
-                providerSelection: menuProvider,
-                metric: metric)
-            return "\(window?.durationLabel ?? "Short") %"
-        case .sevenDayPercent:
-            let window = DisplayFormatter.selectedWindow(
-                states: states,
-                providerSelection: menuProvider,
-                metric: metric)
-            return "\(window?.durationLabel ?? "Long") %"
-        case .bothPercent:
-            return "All limits"
-        case .billingDollars:
-            return metric.label
-        }
-    }
-
     var trackedProviders: [Provider] {
         Provider.allCases.filter { isTracking($0) }
     }
@@ -197,6 +176,11 @@ final class UsageStore: ObservableObject {
         } else {
             states[provider] = ProviderState()
         }
+    }
+
+    func setMenuProvider(_ selection: MenuProviderSelection) {
+        guard selection.isAvailable(with: trackedProviders) else { return }
+        menuProvider = selection
     }
 
     private func refresh(providers: [Provider]) async {
@@ -356,52 +340,38 @@ struct MenuContentView: View {
                     Text("Menu")
                         .foregroundStyle(visualTheme.textColor)
                         .frame(width: Self.footerLabelWidth, alignment: .leading)
-                    Picker("", selection: Binding(
+                    NativeSegmentedPicker(
+                        selection: Binding(
                             get: { store.menuProvider },
-                            set: { store.menuProvider = $0 }))
-                    {
-                        ForEach(MenuProviderSelection.allCases) { option in
-                            Text(option.label).tag(option)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .focusable(false)
-                    .frame(width: Self.footerControlWidth)
+                            set: { store.setMenuProvider($0) }),
+                        options: MenuProviderSelection.allCases,
+                        label: \.label,
+                        isEnabled: { $0.isAvailable(with: store.trackedProviders) })
+                        .frame(width: Self.footerControlWidth)
                 }
                 GridRow {
                     Text("Metric")
                         .foregroundStyle(visualTheme.textColor)
                         .frame(width: Self.footerLabelWidth, alignment: .leading)
-                    Picker("", selection: Binding(
+                    NativeSegmentedPicker(
+                        selection: Binding(
                             get: { store.menuMetric },
-                            set: { store.menuMetric = $0 }))
-                    {
-                        ForEach(MenuMetric.allCases) { metric in
-                            Text(store.menuMetricLabel(metric)).tag(metric)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .focusable(false)
-                    .frame(width: Self.footerControlWidth)
+                            set: { store.menuMetric = $0 }),
+                        options: MenuMetric.allCases,
+                        label: \.label)
+                        .frame(width: Self.footerControlWidth)
                 }
                 GridRow {
                     Text("Display")
                         .foregroundStyle(visualTheme.textColor)
                         .frame(width: Self.footerLabelWidth, alignment: .leading)
-                    Picker("", selection: Binding(
+                    NativeSegmentedPicker(
+                        selection: Binding(
                             get: { store.menuDisplayMode },
-                            set: { store.menuDisplayMode = $0 }))
-                    {
-                        ForEach(MenuDisplayMode.allCases) { mode in
-                            Text(mode.label).tag(mode)
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .focusable(false)
-                    .frame(width: Self.footerControlWidth)
+                            set: { store.menuDisplayMode = $0 }),
+                        options: MenuDisplayMode.allCases,
+                        label: \.label)
+                        .frame(width: Self.footerControlWidth)
                 }
                 GridRow {
                     Text("Refresh")
@@ -509,6 +479,41 @@ private struct FooterActionButton: View {
                 isHovering = hovering
             }
         }
+    }
+}
+
+private struct NativeSegmentedPicker<Option: Hashable & Identifiable>: View {
+    @Binding var selection: Option
+    var options: [Option]
+    var label: (Option) -> String
+    var isEnabled: (Option) -> Bool = { _ in true }
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var selectionAnimation: Animation? {
+        reduceMotion ? nil : .snappy(duration: 0.22, extraBounce: 0)
+    }
+
+    var body: some View {
+        Picker("", selection: Binding(
+            get: { selection },
+            set: { option in
+                guard isEnabled(option), option != selection else { return }
+                withAnimation(selectionAnimation) {
+                    selection = option
+                }
+            }))
+        {
+            ForEach(options) { option in
+                Text(label(option))
+                    .tag(option)
+                    .disabled(!isEnabled(option))
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .focusable(false)
+        .animation(selectionAnimation, value: selection)
     }
 }
 
