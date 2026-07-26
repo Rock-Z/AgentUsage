@@ -233,12 +233,8 @@ final class UsageStore: ObservableObject {
                     state.snapshot = snapshot
                     state.error = nil
                 case let .failure(error):
-                    if provider == .claude, state.snapshot != nil {
-                        // Retain the last successful Claude reading on transient failures.
-                        state.error = nil
-                    } else {
-                        state.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                    }
+                    state.error = (error as? LocalizedError)?.errorDescription
+                        ?? error.localizedDescription
                 }
                 states[provider] = state
             }

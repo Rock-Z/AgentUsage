@@ -552,15 +552,19 @@ private final class CodexRPCClient: @unchecked Sendable {
 }
 
 struct ClaudeUsageFetcher: UsageFetching {
+    var environment: [String: String] = ProcessInfo.processInfo.environment
+
     func fetch() async throws -> UsageSnapshot {
-        try await ClaudeOAuthUsageFetcher.fetch()
+        try await ClaudeOAuthUsageFetcher.fetch(environment: environment)
     }
 }
 
 enum ClaudeOAuthUsageFetcher {
     private static let gate = ClaudeOAuthUsageRateLimitGate()
 
-    static func fetch() async throws -> UsageSnapshot {
+    static func fetch(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) async throws -> UsageSnapshot {
         switch await gate.decision() {
         case let .cached(snapshot):
             return snapshot
@@ -570,7 +574,16 @@ enum ClaudeOAuthUsageFetcher {
             break
         }
 
-        let response = try await ClaudeCredentialHelper.fetch()
+        var response = try await ClaudeCredentialHelper.fetch()
+        response = try await responseAfterDelegatedRefreshIfNeeded(
+            response,
+            refresh: {
+                await ClaudeOAuthRefreshCoordinator.shared.refresh(
+                    environment: environment)
+            },
+            retry: {
+                try await ClaudeCredentialHelper.fetch()
+            })
         if response.statusCode == 429 {
             let retryAfter = retryAfterDate(from: response.retryAfter)
             if let cached = await gate.recordRateLimit(retryAfter: retryAfter) {
@@ -591,6 +604,21 @@ enum ClaudeOAuthUsageFetcher {
             subscriptionType: response.subscriptionType)
         await gate.recordSuccess(snapshot)
         return snapshot
+    }
+
+    static func responseAfterDelegatedRefreshIfNeeded(
+        _ response: ClaudeHelperResponse,
+        refresh: @Sendable () async -> Bool,
+        retry: @Sendable () async throws -> ClaudeHelperResponse
+    ) async throws -> ClaudeHelperResponse {
+        guard ClaudeOAuthRefreshPolicy.shouldAttempt(
+            statusCode: response.statusCode,
+            alreadyAttempted: false),
+            await refresh()
+        else {
+            return response
+        }
+        return try await retry()
     }
 
     static func snapshot(

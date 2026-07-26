@@ -16,6 +16,10 @@ enum SelfTest {
         try testCreditFormatting()
         try testClaudeOAuthUsageParserReadsWindows()
         try testClaudeCredentialHelperFraming()
+        try testClaudeOAuthRefreshPolicyIsExact()
+        try testClaudeOAuthRefreshEnvironmentIsIsolated()
+        try testClaudeOAuthDelegatedRefreshRetriesOnce()
+        try testClaudeOAuthRefreshPTYUsesStatus()
         try testDurationLabelsAndCodexWindowClassification()
         try testCodexAccountUsageParsingAndFormatting()
         try testPreferredAxisMaximums()
@@ -66,6 +70,146 @@ enum SelfTest {
             response.subscriptionType == "pro",
             "expected helper subscription type")
         try expect(response.body == body, "expected helper body bytes to remain unchanged")
+    }
+
+    private static func testClaudeOAuthRefreshPolicyIsExact() throws {
+        try expect(
+            ClaudeOAuthRefreshPolicy.shouldAttempt(
+                statusCode: 401,
+                alreadyAttempted: false),
+            "expected first OAuth 401 to trigger delegated refresh")
+        try expect(
+            !ClaudeOAuthRefreshPolicy.shouldAttempt(
+                statusCode: 401,
+                alreadyAttempted: true),
+            "expected OAuth refresh to run at most once")
+        try expect(
+            !ClaudeOAuthRefreshPolicy.shouldAttempt(
+                statusCode: 429,
+                alreadyAttempted: false),
+            "expected rate limiting not to trigger OAuth refresh")
+    }
+
+    private static func testClaudeOAuthRefreshEnvironmentIsIsolated() throws {
+        let directory = URL(fileURLWithPath: "/tmp/AgentUsage-ClaudeOAuthRefresh")
+        let environment = ClaudeOAuthRefreshEnvironment.make(
+            [
+                "PATH": "/usr/bin",
+                "PWD": "/private/project",
+                "OLDPWD": "/private",
+                "ANTHROPIC_API_KEY": "must-not-leak",
+                "SAFE_VALUE": "preserved",
+            ],
+            workingDirectory: directory)
+
+        try expect(
+            environment["PWD"] == directory.path,
+            "expected Claude refresh PWD to use its isolated directory")
+        try expect(
+            environment["OLDPWD"] == nil,
+            "expected Claude refresh to remove OLDPWD")
+        try expect(
+            environment["ANTHROPIC_API_KEY"] == nil,
+            "expected Claude refresh to ignore inherited Anthropic credentials")
+        try expect(
+            environment["CLAUDE_CODE_SAFE_MODE"] == "1",
+            "expected Claude refresh to disable project customizations")
+        try expect(
+            environment["SAFE_VALUE"] == "preserved",
+            "expected unrelated environment values to remain")
+    }
+
+    private static func testClaudeOAuthDelegatedRefreshRetriesOnce() throws {
+        try awaitTest {
+            let state = ClaudeOAuthRefreshTestState()
+            let initial = ClaudeHelperResponse(
+                statusCode: 401,
+                retryAfter: nil,
+                subscriptionType: nil,
+                body: Data())
+            let response = try await ClaudeOAuthUsageFetcher
+                .responseAfterDelegatedRefreshIfNeeded(
+                    initial,
+                    refresh: {
+                        await state.recordRefresh()
+                        return true
+                    },
+                    retry: {
+                        await state.recordRetry()
+                        return ClaudeHelperResponse(
+                            statusCode: 200,
+                            retryAfter: nil,
+                            subscriptionType: "pro",
+                            body: Data(#"{"five_hour":{"utilization":10}}"#.utf8))
+                    })
+
+            try expect(
+                response.statusCode == 200,
+                "expected a successful response after delegated refresh")
+            let counts = await state.counts()
+            try expect(counts.refresh == 1, "expected one delegated refresh")
+            try expect(counts.retry == 1, "expected one usage retry")
+        }
+    }
+
+    private static func testClaudeOAuthRefreshPTYUsesStatus() throws {
+        try awaitTest {
+            let fileManager = FileManager.default
+            let directory = fileManager.temporaryDirectory
+                .appendingPathComponent(
+                    "AgentUsage-ClaudeOAuthRefreshTest-\(UUID().uuidString)",
+                    isDirectory: true)
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true)
+            defer { try? fileManager.removeItem(at: directory) }
+
+            let marker = directory.appendingPathComponent("status-ran")
+            let executable = directory.appendingPathComponent("claude")
+            let script = """
+            #!/bin/sh
+            IFS= read -r command
+            if [ "$command" = "/status" ]; then
+              printf refreshed > "$AGENTUSAGE_TEST_MARKER"
+              exit 0
+            fi
+            exit 1
+            """
+            try Data(script.utf8).write(to: executable)
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: executable.path)
+
+            let coordinator = ClaudeOAuthRefreshCoordinator()
+            let succeeded = await coordinator.refresh(
+                environment: [
+                    "HOME": NSHomeDirectory(),
+                    "PATH": directory.path,
+                    "AGENTUSAGE_TEST_MARKER": marker.path,
+                ])
+            try expect(succeeded, "expected fake Claude /status touch to succeed")
+            try expect(
+                (try? String(contentsOf: marker, encoding: .utf8)) == "refreshed",
+                "expected delegated refresh to send /status over its PTY")
+        }
+    }
+
+    private static func awaitTest(
+        _ operation: @escaping @Sendable () async throws -> Void
+    ) throws {
+        let result = SelfTestResultBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached {
+            do {
+                try await operation()
+                result.set(.success(()))
+            } catch {
+                result.set(.failure(error))
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        try result.get().get()
     }
 
     private static func testDurationLabelsAndCodexWindowClassification() throws {
@@ -472,5 +616,40 @@ enum SelfTest {
             }
         }
         return count
+    }
+}
+
+private actor ClaudeOAuthRefreshTestState {
+    private var refreshCount = 0
+    private var retryCount = 0
+
+    func recordRefresh() {
+        refreshCount += 1
+    }
+
+    func recordRetry() {
+        retryCount += 1
+    }
+
+    func counts() -> (refresh: Int, retry: Int) {
+        (refreshCount, retryCount)
+    }
+}
+
+private final class SelfTestResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<Void, Error>?
+
+    func set(_ result: Result<Void, Error>) {
+        lock.lock()
+        self.result = result
+        lock.unlock()
+    }
+
+    func get() -> Result<Void, Error> {
+        lock.lock()
+        defer { lock.unlock() }
+        return result ?? .failure(
+            SelfTest.Failure.expectation("async self-test produced no result"))
     }
 }
