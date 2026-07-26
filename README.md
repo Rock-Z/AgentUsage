@@ -11,13 +11,22 @@ Licensed under the [MIT License](LICENSE).
 
 ## Install
 
-Install by downloading the latest release from [Releases](https://github.com/Rock-Z/AgentUsage/releases)
+AgentUsage is not Apple Developer ID-signed or notarized. The recommended installation path is the release installer:
 
-To build from source instead:
+```sh
+curl -fsSL https://github.com/Rock-Z/AgentUsage/releases/latest/download/install.sh \
+  | AGENTUSAGE_ALLOW_UNNOTARIZED=1 bash
+```
+
+Alternatively, build and install from source:
 
 ```sh
 ./Scripts/build-app.sh --install
 ```
+
+The DMG on [Releases](https://github.com/Rock-Z/AgentUsage/releases) remains available for manual installation. After installing an updater-enabled release, AgentUsage checks for updates hourly and also provides **Check for Updates** at the bottom of its popout.
+
+The first launch may require using **Open Anyway** in System Settings → Privacy & Security.
 
 ## See also
 
