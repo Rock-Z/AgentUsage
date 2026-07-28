@@ -1,7 +1,7 @@
 import Foundation
-import Security
 
 private let keychainService = "Claude Code-credentials"
+private let keychainReadTimeout: TimeInterval = 5
 private let usageEndpoint =
     URL(string: "https://api.anthropic.com/api/oauth/usage")!
 
@@ -15,18 +15,51 @@ private struct Credential {
     var subscriptionType: String?
 }
 
-private func credential() -> Credential {
-    let query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: keychainService,
-        kSecReturnData as String: true,
-        kSecMatchLimit as String: kSecMatchLimitOne,
+private func keychainData() -> Data {
+    let process = Process()
+    let stdout = Pipe()
+    // Claude Code stores and refreshes this item through the system security
+    // tool. Use that same stable, Apple-signed reader so a credential rewrite
+    // cannot invalidate access based on this helper's changing code identity.
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+    process.arguments = [
+        "find-generic-password",
+        "-a", NSUserName(),
+        "-s", keychainService,
+        "-w",
     ]
-    var item: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &item)
-    guard status == errSecSuccess, let data = item as? Data else {
-        fail("Claude credential is unavailable (Keychain status \(status)).")
+    process.standardOutput = stdout
+    process.standardError = FileHandle.nullDevice
+
+    do {
+        try process.run()
+    } catch {
+        fail(
+            "Claude credential is unavailable "
+                + "(could not launch macOS Keychain access).")
     }
+
+    let deadline = Date().addingTimeInterval(keychainReadTimeout)
+    while process.isRunning, Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.02)
+    }
+    if process.isRunning {
+        process.terminate()
+        process.waitUntilExit()
+        fail("Claude credential is unavailable (Keychain access timed out).")
+    }
+
+    let data = stdout.fileHandleForReading.readDataToEndOfFile()
+    guard process.terminationStatus == 0, !data.isEmpty else {
+        fail(
+            "Claude credential is unavailable "
+                + "(macOS Keychain access failed).")
+    }
+    return data
+}
+
+private func credential() -> Credential {
+    let data = keychainData()
     guard
         let root = try? JSONSerialization.jsonObject(with: data)
             as? [String: Any],

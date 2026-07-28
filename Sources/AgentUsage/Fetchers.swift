@@ -109,6 +109,18 @@ struct CodexUsageFetcher: UsageFetching {
     var environment: [String: String] = ProcessInfo.processInfo.environment
 
     func fetch() async throws -> UsageSnapshot {
+        do {
+            return try await fetchOnce()
+        } catch {
+            guard CodexCredentialRepairTrigger.matches(error: error)
+            else { throw error }
+            try await CodexCredentialRepairer.shared.cycle(
+                environment: environment)
+            return try await fetchOnce()
+        }
+    }
+
+    private func fetchOnce() async throws -> UsageSnapshot {
         let rpc = try CodexRPCClient(environment: environment)
         defer { rpc.shutdown() }
         try await rpc.initialize()

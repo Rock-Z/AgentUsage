@@ -4,6 +4,7 @@ import SwiftUI
 
 @main
 struct AgentUsageApp: App {
+    @NSApplicationDelegateAdaptor(AgentUsageApplicationDelegate.self) private var appDelegate
     @StateObject private var store = UsageStore()
     @StateObject private var updateController = UpdateController()
 
@@ -34,6 +35,100 @@ struct AgentUsageApp: App {
             MenuBarLabelView(store: store)
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+@MainActor
+final class AgentUsageApplicationDelegate: NSObject, NSApplicationDelegate {
+    private var revealTask: Task<Void, Never>?
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        revealMenuBarExtra(after: 0.35)
+        return false
+    }
+
+    private func revealMenuBarExtra(after delay: TimeInterval = 0.05) {
+        revealTask?.cancel()
+        revealTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: .seconds(delay))
+                for attempt in 0..<20 {
+                    try Task.checkCancellation()
+                    if self.isMenuBarExtraVisible {
+                        return
+                    }
+                    if let button = self.statusBarButton(),
+                       let action = button.action
+                    {
+                        _ = NSApp.sendAction(
+                            action,
+                            to: button.target,
+                            from: button)
+                        NSApp.activate()
+                        return
+                    }
+                    if attempt < 19 {
+                        try await Task.sleep(for: .milliseconds(50))
+                    }
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                return
+            }
+        }
+    }
+
+    private var isMenuBarExtraVisible: Bool {
+        let windows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly],
+            kCGNullWindowID) as? [[String: Any]] ?? []
+        return windows.contains {
+            $0[kCGWindowOwnerPID as String] as? Int32 == getpid()
+                && $0[kCGWindowLayer as String] as? Int == 101
+        }
+    }
+
+    private func statusBarButton() -> NSStatusBarButton? {
+        for window in NSApp.windows {
+            if let contentView = window.contentView,
+               let button = statusBarButton(in: contentView)
+            {
+                return button
+            }
+        }
+
+        let statusItemsSelector = NSSelectorFromString("_statusItems")
+        guard NSStatusBar.system.responds(to: statusItemsSelector),
+              let result = NSStatusBar.system.perform(statusItemsSelector)
+        else { return nil }
+
+        let value = result.takeUnretainedValue()
+        let statusItems: [NSStatusItem]
+        if let items = value as? [NSStatusItem] {
+            statusItems = items
+        } else if let pointerArray = value as? NSPointerArray {
+            statusItems = pointerArray.allObjects.compactMap { $0 as? NSStatusItem }
+        } else {
+            return nil
+        }
+        return statusItems.compactMap(\.button).first
+    }
+
+    private func statusBarButton(in view: NSView) -> NSStatusBarButton? {
+        if let button = view as? NSStatusBarButton {
+            return button
+        }
+        for subview in view.subviews {
+            if let button = statusBarButton(in: subview) {
+                return button
+            }
+        }
+        return nil
     }
 }
 
@@ -245,6 +340,8 @@ final class UsageStore: ObservableObject {
 struct MenuContentView: View {
     @ObservedObject var store: UsageStore
     @ObservedObject var updateController: UpdateController
+    @StateObject private var launchAtLoginController = LaunchAtLoginController()
+    @AppStorage("optionsExpanded") private var optionsExpanded = false
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
@@ -285,7 +382,7 @@ struct MenuContentView: View {
                 }
             }
             Divider()
-            footer
+            optionsSection
         }
         .background(.thinMaterial)
         .foregroundStyle(visualTheme.textColor)
@@ -334,13 +431,57 @@ struct MenuContentView: View {
         }
     }
 
+    private var optionsSection: some View {
+        VStack(spacing: 0) {
+            Button {
+                toggleOptions()
+            } label: {
+                HStack {
+                    Text("Options")
+                        .font(.headline)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 12, height: 12)
+                        .rotationEffect(
+                            .degrees(optionsExpanded ? 90 : 0))
+                        .transaction { transaction in
+                            transaction.animation = nil
+                        }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .accessibilityValue(optionsExpanded ? "Expanded" : "Collapsed")
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            footer
+                .frame(
+                    height: optionsExpanded ? nil : 0,
+                    alignment: .top)
+                .clipped()
+                .opacity(optionsExpanded ? 1 : 0)
+                .allowsHitTesting(optionsExpanded)
+                .accessibilityHidden(!optionsExpanded)
+        }
+    }
+
+    private func toggleOptions() {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            optionsExpanded.toggle()
+        }
+    }
+
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 8) {
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
                 GridRow {
-                    Text("Enable")
-                        .foregroundStyle(visualTheme.textColor)
-                        .frame(width: Self.footerLabelWidth, alignment: .leading)
+                    optionLabel("Enable")
                     NativeSegmentedPicker(
                         selection: Binding(
                             get: { store.enabledProviderSelection },
@@ -350,9 +491,7 @@ struct MenuContentView: View {
                         .frame(width: Self.footerControlWidth)
                 }
                 GridRow {
-                    Text("Show")
-                        .foregroundStyle(visualTheme.textColor)
-                        .frame(width: Self.footerLabelWidth, alignment: .leading)
+                    optionLabel("Show")
                     NativeSegmentedPicker(
                         selection: Binding(
                             get: { store.menuProvider },
@@ -363,9 +502,7 @@ struct MenuContentView: View {
                         .frame(width: Self.footerControlWidth)
                 }
                 GridRow {
-                    Text("Metric")
-                        .foregroundStyle(visualTheme.textColor)
-                        .frame(width: Self.footerLabelWidth, alignment: .leading)
+                    optionLabel("Metric")
                     NativeSegmentedPicker(
                         selection: Binding(
                             get: { store.menuMetric },
@@ -375,9 +512,7 @@ struct MenuContentView: View {
                         .frame(width: Self.footerControlWidth)
                 }
                 GridRow {
-                    Text("Display")
-                        .foregroundStyle(visualTheme.textColor)
-                        .frame(width: Self.footerLabelWidth, alignment: .leading)
+                    optionLabel("Display")
                     NativeSegmentedPicker(
                         selection: Binding(
                             get: { store.menuDisplayMode },
@@ -387,9 +522,7 @@ struct MenuContentView: View {
                         .frame(width: Self.footerControlWidth)
                 }
                 GridRow {
-                    Text("Refresh")
-                        .foregroundStyle(visualTheme.textColor)
-                        .frame(width: Self.footerLabelWidth, alignment: .leading)
+                    optionLabel("Refresh")
                     HStack(spacing: 10) {
                         DiscreteRefreshSlider(
                             index: Binding(
@@ -406,6 +539,36 @@ struct MenuContentView: View {
                     }
                     .frame(width: Self.footerControlWidth)
                 }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Open on Startup")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(visualTheme.textColor)
+                    Spacer()
+                    Toggle(
+                        "Open on Startup",
+                        isOn: Binding(
+                            get: { launchAtLoginController.isEnabled },
+                            set: { launchAtLoginController.setEnabled($0) }))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                }
+                .frame(
+                    width: Self.footerLabelWidth + 12 + Self.footerControlWidth)
+
+                if let errorMessage = launchAtLoginController.errorMessage {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(visualTheme.errorText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.vertical, 2)
+            .onAppear {
+                launchAtLoginController.refresh()
             }
 
             VStack(alignment: .leading, spacing: 0) {
@@ -429,8 +592,14 @@ struct MenuContentView: View {
         }
         .font(.callout)
         .padding(.horizontal, 12)
-        .padding(.top, 12)
-        .padding(.bottom, 4)
+        .padding(.bottom, 6)
+    }
+
+    private func optionLabel(_ title: String) -> some View {
+        Text(title)
+            .font(.callout.weight(.medium))
+            .foregroundStyle(visualTheme.textColor)
+            .frame(width: Self.footerLabelWidth, alignment: .leading)
     }
 
     private var refreshIntervalIndex: Int {
@@ -475,6 +644,7 @@ private struct FooterActionButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
+                .font(.callout.weight(.medium))
                 .foregroundStyle(textColor.opacity(isEnabled ? 1 : 0.45))
                 .frame(width: width, alignment: .leading)
                 .padding(.horizontal, 8)
@@ -1206,7 +1376,11 @@ private struct UsageVisualTheme: Equatable {
     private var semanticSecondary: Color { Color(nsColor: .secondaryLabelColor) }
     private var semanticTertiary: Color { Color(nsColor: .tertiaryLabelColor) }
 
-    var accentColor: Color { Color(nsColor: .systemBlue) }
+    var accentColor: Color {
+        colorScheme == .dark
+            ? Color(red: 0.31, green: 0.61, blue: 0.84)
+            : Color(red: 0.16, green: 0.47, blue: 0.74)
+    }
 
     private var contrastBoost: Double {
         contrast == .increased ? 0.08 : 0

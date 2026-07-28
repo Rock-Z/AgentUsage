@@ -14,10 +14,7 @@ if [[ ! -d "$APP_PATH" ]]; then
   exit 1
 fi
 
-if [[ -f "$SIGNING_KEYCHAIN" ]] \
-  && ! security find-identity -v -p codesigning "$SIGNING_KEYCHAIN" 2>/dev/null \
-    | grep -F "\"$IDENTITY_NAME\"" >/dev/null
-then
+if [[ -f "$SIGNING_KEYCHAIN" ]]; then
   KEYCHAIN_PASSWORD="$(
     security find-generic-password \
       -w \
@@ -27,6 +24,11 @@ then
   )"
   if [[ -n "$KEYCHAIN_PASSWORD" ]]; then
     security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN"
+    security set-key-partition-list \
+      -S apple-tool:,apple:,codesign: \
+      -s \
+      -k "$KEYCHAIN_PASSWORD" \
+      "$SIGNING_KEYCHAIN" >/dev/null
   fi
 fi
 

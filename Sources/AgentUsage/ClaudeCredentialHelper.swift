@@ -8,12 +8,11 @@ struct ClaudeHelperResponse: Sendable {
 }
 
 enum ClaudeCredentialHelper {
-    private static let directoryName = "ClaudeUsageHelper-v1"
     private static let executableName = "AgentUsageClaudeHelper"
     private static let timeout: TimeInterval = 12
 
     static func fetch() async throws -> ClaudeHelperResponse {
-        let executable = try installedExecutable()
+        let executable = try bundledExecutable()
         return try await Task.detached(priority: .utility) {
             try run(executable: executable)
         }.value
@@ -52,8 +51,11 @@ enum ClaudeCredentialHelper {
             body: Data(output[bodyStart...]))
     }
 
-    private static func installedExecutable() throws -> URL {
+    private static func bundledExecutable() throws -> URL {
         let fileManager = FileManager.default
+        // The helper delegates Keychain access to /usr/bin/security, so it no
+        // longer needs a preserved on-disk identity. Always use the bundled
+        // copy to prevent an older helper from surviving an app update.
         guard let bundled = Bundle.main.executableURL?
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -64,35 +66,7 @@ enum ClaudeCredentialHelper {
             throw FetchError.launchFailed(
                 "bundled Claude credential helper is missing")
         }
-
-        let applicationSupport = try fileManager.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true)
-        let directory = applicationSupport
-            .appendingPathComponent("AgentUsage", isDirectory: true)
-            .appendingPathComponent(directoryName, isDirectory: true)
-        let installed = directory.appendingPathComponent(executableName)
-        if fileManager.isExecutableFile(atPath: installed.path) {
-            return installed
-        }
-
-        try fileManager.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
-        let staging = directory.appendingPathComponent(
-            ".\(executableName).installing")
-        if fileManager.fileExists(atPath: staging.path) {
-            try fileManager.removeItem(at: staging)
-        }
-        try fileManager.copyItem(at: bundled, to: staging)
-        try fileManager.setAttributes(
-            [.posixPermissions: 0o700],
-            ofItemAtPath: staging.path)
-        try fileManager.moveItem(at: staging, to: installed)
-        return installed
+        return bundled
     }
 
     private static func run(executable: URL) throws -> ClaudeHelperResponse {

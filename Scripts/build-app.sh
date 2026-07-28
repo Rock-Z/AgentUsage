@@ -27,9 +27,8 @@ fi
 
 if [[ -n "${AGENTUSAGE_CLAUDE_HELPER:-}" ]]; then
   CLAUDE_HELPER="$AGENTUSAGE_CLAUDE_HELPER"
-elif [[ -x "$(dirname "$EXECUTABLE")/AgentUsageClaudeHelper" ]]; then
-  CLAUDE_HELPER="$(dirname "$EXECUTABLE")/AgentUsageClaudeHelper"
 else
+  # Never package a helper left over from an earlier release build.
   swift build -c "$CONFIGURATION" --product AgentUsageClaudeHelper
   CLAUDE_HELPER="$ROOT_DIR/.build/$CONFIGURATION/AgentUsageClaudeHelper"
 fi
@@ -87,11 +86,13 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.4.4</string>
+  <string>0.4.5</string>
   <key>CFBundleVersion</key>
-  <string>10</string>
+  <string>11</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
+  <key>LSMultipleInstancesProhibited</key>
+  <true/>
   <key>LSUIElement</key>
   <true/>
   <key>NSHighResolutionCapable</key>
@@ -121,9 +122,33 @@ PLIST
 echo "Built $APP_DIR"
 
 if [[ "${1:-}" == "--install" ]]; then
-  INSTALL_DIR="$HOME/Applications"
+  INSTALL_DIR="${AGENTUSAGE_INSTALL_DIR:-$HOME/Applications}"
+  TARGET_APP="$INSTALL_DIR/$APP_NAME.app"
+  STAGING_APP="$INSTALL_DIR/.$APP_NAME.app.installing"
+  BACKUP_APP="$INSTALL_DIR/.$APP_NAME.app.previous"
+
   mkdir -p "$INSTALL_DIR"
-  rm -rf "$INSTALL_DIR/$APP_NAME.app"
-  cp -R "$APP_DIR" "$INSTALL_DIR/$APP_NAME.app"
-  echo "Installed $INSTALL_DIR/$APP_NAME.app"
+  rm -rf "$STAGING_APP" "$BACKUP_APP"
+  ditto "$APP_DIR" "$STAGING_APP"
+
+  # A process keeps the code identity it launched with even if its bundle is
+  # replaced underneath it. Stop every prior copy before swapping the app so
+  # Keychain evaluates the newly installed, stably signed executable.
+  pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+
+  if [[ -d "$TARGET_APP" ]]; then
+    mv "$TARGET_APP" "$BACKUP_APP"
+  fi
+  if ! mv "$STAGING_APP" "$TARGET_APP"; then
+    if [[ -d "$BACKUP_APP" ]]; then
+      mv "$BACKUP_APP" "$TARGET_APP"
+    fi
+    exit 1
+  fi
+  rm -rf "$BACKUP_APP"
+
+  echo "Installed $TARGET_APP"
+  if [[ "${AGENTUSAGE_SKIP_LAUNCH:-0}" != "1" ]]; then
+    open "$TARGET_APP"
+  fi
 fi

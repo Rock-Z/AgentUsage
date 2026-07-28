@@ -28,6 +28,8 @@ enum SelfTest {
         try testFirstLaunchSettingsFollowAvailableProviders()
         try testChartPositionsDefaultLatestAndPersistIndependently()
         try testUpdateActionTitles()
+        try testLaunchAtLoginControllerTracksServiceAndErrors()
+        try testCredentialRepairTriggersAreExact()
         try testWeeklyActivityUsesMondayThroughSundayBuckets()
         try testPartialDualLimitFormatting()
         try testResetCreditSummaryAndExpirationHelp()
@@ -411,6 +413,45 @@ enum SelfTest {
             "expected ready update action")
     }
 
+    private static func testLaunchAtLoginControllerTracksServiceAndErrors() throws {
+        let service = LaunchAtLoginTestService()
+        let controller = LaunchAtLoginController(service: service)
+
+        try expect(
+            !controller.isEnabled,
+            "expected launch at login to start disabled")
+        controller.setEnabled(true)
+        try expect(
+            controller.isEnabled && service.setValues == [true],
+            "expected launch at login to enable through the service")
+
+        service.error = LaunchAtLoginTestError.denied
+        controller.setEnabled(false)
+        try expect(
+            controller.isEnabled,
+            "expected failed disable to preserve service state")
+        try expect(
+            controller.errorMessage == "Login item change denied.",
+            "expected launch at login error to remain visible")
+    }
+
+    private static func testCredentialRepairTriggersAreExact() throws {
+        let initialize = FetchError.timeout("initialize")
+        let otherTimeout = FetchError.timeout("account/rateLimits/read")
+        let broadCredentialText = FetchError.malformed(
+            "some unrelated credential warning")
+
+        try expect(
+            CodexCredentialRepairTrigger.matches(error: initialize),
+            "expected the exact Codex initialize timeout to trigger repair")
+        try expect(
+            !CodexCredentialRepairTrigger.matches(error: otherTimeout),
+            "expected another Codex timeout to remain untouched")
+        try expect(
+            !CodexCredentialRepairTrigger.matches(error: broadCredentialText),
+            "expected broad credential text not to trigger repair")
+    }
+
     private static func testWeeklyActivityUsesMondayThroughSundayBuckets() throws {
         let days = [
             TokenUsageDay(startDate: "2026-07-19", tokens: 10),
@@ -616,6 +657,26 @@ enum SelfTest {
             }
         }
         return count
+    }
+}
+
+private enum LaunchAtLoginTestError: LocalizedError {
+    case denied
+
+    var errorDescription: String? {
+        "Login item change denied."
+    }
+}
+
+private final class LaunchAtLoginTestService: LaunchAtLoginManaging {
+    var isEnabled = false
+    var setValues: [Bool] = []
+    var error: Error?
+
+    func setEnabled(_ enabled: Bool) throws {
+        setValues.append(enabled)
+        if let error { throw error }
+        isEnabled = enabled
     }
 }
 
