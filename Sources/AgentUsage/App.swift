@@ -1129,6 +1129,17 @@ struct ProviderCard: View {
             }
 
             if let error = state.error {
+                if provider == .claude,
+                   error == "Unexpected response: Claude credential does not contain an OAuth access token."
+                {
+                    (Text("**Claude is signed out.** Run ")
+                        + Text(Image(nsImage: Self.signInCommandBadge))
+                            .baselineOffset(-3)
+                        + Text(" in Terminal, then refresh."))
+                        .font(.system(size: 11))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel("Claude is signed out. Run claude auth login in Terminal, then refresh.")
+                }
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(theme.errorText)
@@ -1136,6 +1147,23 @@ struct ProviderCard: View {
             }
         }
         .opacity(isTracking ? 1 : 0.55)
+    }
+
+    private static var signInCommandBadge: NSImage {
+        let command = NSAttributedString(
+            string: "claude auth login",
+            attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                .foregroundColor: NSColor.labelColor,
+            ])
+        let textSize = command.size()
+        let size = NSSize(width: ceil(textSize.width) + 8, height: ceil(textSize.height) + 2)
+        return NSImage(size: size, flipped: false) { rect in
+            NSColor.quaternaryLabelColor.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5).fill()
+            command.draw(at: NSPoint(x: 4, y: 1))
+            return true
+        }
     }
 
     private var providerHeader: some View {

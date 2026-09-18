@@ -444,7 +444,11 @@ private final class CodexRPCClient: @unchecked Sendable {
         self.stdoutContinuation = continuation
 
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = [binary, "-s", "read-only", "-a", "untrusted", "app-server"]
+        // `app-server` is a subcommand in current Codex releases. The old
+        // `-a untrusted app-server` form now exits immediately because
+        // `untrusted` is no longer a valid approval policy, which otherwise
+        // surfaces here as the misleading "closed stdout" error.
+        process.arguments = [binary, "app-server", "--stdio"]
         process.environment = BinaryLocator.enrichedEnvironment(environment)
         process.currentDirectoryURL = Self.probeDirectory()
         process.standardInput = stdinPipe
@@ -529,7 +533,18 @@ private final class CodexRPCClient: @unchecked Sendable {
                     }
                     return JSONMessage(value: message)
                 }
-                throw FetchError.malformed("codex app-server closed stdout")
+                let stderrData = self.stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                let stderr = String(data: stderrData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let exitStatus = self.process.terminationStatus
+                if let stderr, !stderr.isEmpty {
+                    let detail = String(
+                        stderr.replacingOccurrences(of: "\n", with: " ").prefix(500))
+                    throw FetchError.malformed(
+                        "codex app-server closed stdout (exit \(exitStatus)): \(detail)")
+                }
+                throw FetchError.malformed(
+                    "codex app-server closed stdout (exit \(exitStatus))")
             }
             group.addTask {
                 try await Task.sleep(for: .seconds(timeout))
