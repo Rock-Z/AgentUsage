@@ -411,9 +411,31 @@ private final class CodexRPCClient: @unchecked Sendable {
     private let stdoutStream: AsyncStream<Data>
     private let stdoutContinuation: AsyncStream<Data>.Continuation
     private var nextID = 1
+    private let stderrBuffer = DiagnosticBuffer()
 
     private struct JSONMessage: @unchecked Sendable {
         var value: [String: Any]
+    }
+
+    // Drain stderr continuously so a noisy server cannot fill its pipe, and
+    // never wait for EOF from a process that may still be running.
+    private final class DiagnosticBuffer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func append(_ chunk: Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            data.append(chunk)
+            data = Data(data.suffix(4096))
+        }
+
+        func text() -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            return String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
     }
 
     private final class LineBuffer: @unchecked Sendable {
@@ -461,6 +483,14 @@ private final class CodexRPCClient: @unchecked Sendable {
             throw FetchError.launchFailed(error.localizedDescription)
         }
 
+        stderrPipe.fileHandleForReading.readabilityHandler = { [stderrBuffer] handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+            } else {
+                stderrBuffer.append(chunk)
+            }
+        }
         let buffer = LineBuffer()
         stdoutPipe.fileHandleForReading.readabilityHandler = { [stdoutContinuation] handle in
             let chunk = handle.availableData
@@ -503,6 +533,8 @@ private final class CodexRPCClient: @unchecked Sendable {
     }
 
     func shutdown() {
+        stdoutContinuation.finish()
+        try? stdinPipe.fileHandleForWriting.close()
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
         if process.isRunning {
@@ -516,6 +548,7 @@ private final class CodexRPCClient: @unchecked Sendable {
         try sendPayload(["id": id, "method": method, "params": params])
 
         let wrapped = try await withThrowingTaskGroup(of: JSONMessage.self) { group in
+            defer { group.cancelAll() }
             group.addTask { [stdoutStream] in
                 for await line in stdoutStream {
                     guard let message = try JSONSerialization.jsonObject(with: line) as? [String: Any] else {
@@ -533,18 +566,18 @@ private final class CodexRPCClient: @unchecked Sendable {
                     }
                     return JSONMessage(value: message)
                 }
-                let stderrData = self.stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                let stderr = String(data: stderrData, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let exitStatus = self.process.terminationStatus
-                if let stderr, !stderr.isEmpty {
+                try Task.checkCancellation()
+                let stderr = self.stderrBuffer.text()
+                let status = self.process.isRunning
+                    ? "still running" : "exit \(self.process.terminationStatus)"
+                if !stderr.isEmpty {
                     let detail = String(
                         stderr.replacingOccurrences(of: "\n", with: " ").prefix(500))
                     throw FetchError.malformed(
-                        "codex app-server closed stdout (exit \(exitStatus)): \(detail)")
+                        "codex app-server closed stdout (\(status)): \(detail)")
                 }
                 throw FetchError.malformed(
-                    "codex app-server closed stdout (exit \(exitStatus))")
+                    "codex app-server closed stdout (\(status))")
             }
             group.addTask {
                 try await Task.sleep(for: .seconds(timeout))
