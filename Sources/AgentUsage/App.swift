@@ -1880,6 +1880,7 @@ private struct HeatmapIntensityLegend: View {
             .font(.system(size: 9))
             .foregroundStyle(theme.textColor)
             .lineLimit(1)
+            .minimumScaleFactor(0.7)
             .frame(width: ChartLayout.axisLabelWidth, height: ChartLayout.plotHeight)
 
             VStack(spacing: rowSpacing) {
