@@ -4,10 +4,12 @@ import Testing
 
 struct SettingsTests {
     @Test func menuProviderFollowsTrackedProviders() {
-        #expect(!MenuProviderSelection.combined.isAvailable(with: [.codex]))
-        #expect(MenuProviderSelection.combined.constrained(to: [.codex]) == .codex)
-        #expect(MenuProviderSelection.combined.constrained(to: [.claude]) == .claude)
-        #expect(MenuProviderSelection.combined.constrained(to: [.codex, .claude]) == .combined)
+        // Pins survive a provider being turned off: showing depends on both.
+        #expect(MenuProviderSelection.combined.displayed(tracking: [.codex]) == [.codex])
+        #expect(MenuProviderSelection.combined.displayed(tracking: [.codex, .claude]) == [.codex, .claude])
+        #expect(MenuProviderSelection.claude.displayed(tracking: [.codex, .claude]) == [.claude])
+        // With every pinned provider off, the enabled ones show rather than nothing.
+        #expect(MenuProviderSelection.claude.displayed(tracking: [.codex]) == [.codex])
     }
 
     @Test func providersToggleIndependentlyButNeverAllOff() {

@@ -232,16 +232,21 @@ final class UsageStore: ObservableObject {
         setEnabledProviders(selection)
     }
 
+    /// Providers the menu bar shows: pinned and turned on.
+    var menuBarProviders: [Provider] {
+        menuProvider.displayed(tracking: trackedProviders)
+    }
+
     func isShown(_ provider: Provider) -> Bool {
-        isTracking(provider) && menuProvider.providers.contains(provider)
+        menuBarProviders.contains(provider)
     }
 
     /// Only enabled providers can be shown, and at least one always is.
+    /// Pins or unpins an enabled provider. Pins of providers that are turned
+    /// off are kept, so they show again when turned back on.
     func setShown(_ provider: Provider, _ shown: Bool) {
         guard isTracking(provider),
-              let selection = MenuProviderSelection(
-                  codex: isShown(.codex), claude: isShown(.claude))
-                  .setting(provider, shown)
+              let selection = menuProvider.setting(provider, shown)
         else { return }
         menuProvider = selection
     }
@@ -250,8 +255,6 @@ final class UsageStore: ObservableObject {
         let previouslyTracked = Set(trackedProviders)
         trackCodex = selection == .codex || selection == .combined
         trackClaude = selection == .claude || selection == .combined
-
-        menuProvider = menuProvider.constrained(to: trackedProviders)
 
         for provider in Provider.allCases {
             if isTracking(provider) {
@@ -401,7 +404,7 @@ struct MenuContentView: View {
                 state: store.states[provider] ?? ProviderState(),
                 isShown: store.isShown(provider),
                 // The only provider in the menu bar stays there.
-                canToggleShown: store.menuProvider.providers.filter(store.isShown) != [provider],
+                canToggleShown: store.menuBarProviders != [provider],
                 toggleShown: { store.setShown(provider, !store.isShown(provider)) },
                 // The last enabled provider stays on.
                 disable: store.trackedProviders == [provider]
@@ -758,7 +761,7 @@ struct MenuBarLabelView: View {
     }
 
     private var entries: [MenuBarStatusEntry] {
-        store.menuProvider.providers.map { provider in
+        store.menuBarProviders.map { provider in
             MenuBarStatusEntry(
                 provider: provider,
                 snapshot: store.states[provider]?.snapshot,

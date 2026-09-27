@@ -57,22 +57,11 @@ enum MenuProviderSelection: String, CaseIterable, Identifiable {
         return MenuProviderSelection(codex: providers.contains(.codex), claude: providers.contains(.claude))
     }
 
-    func isAvailable(with trackedProviders: [Provider]) -> Bool {
-        switch self {
-        case .codex:
-            trackedProviders.contains(.codex)
-        case .claude:
-            trackedProviders.contains(.claude)
-        case .combined:
-            Provider.allCases.allSatisfy(trackedProviders.contains)
-        }
-    }
-
-    func constrained(to trackedProviders: [Provider]) -> MenuProviderSelection {
-        guard !isAvailable(with: trackedProviders),
-              let provider = trackedProviders.first
-        else { return self }
-        return MenuProviderSelection(codex: provider == .codex, claude: provider == .claude)
+    /// The pinned providers that are turned on, so pins survive a provider
+    /// being turned off and back on. If none are on, the enabled ones show.
+    func displayed(tracking trackedProviders: [Provider]) -> [Provider] {
+        let pinned = providers.filter(trackedProviders.contains)
+        return pinned.isEmpty ? trackedProviders : pinned
     }
 }
 
