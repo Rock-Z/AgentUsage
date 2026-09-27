@@ -38,7 +38,9 @@ jobs:
           keychain_password="$(openssl rand -hex 24)"
 
           printf '%s' "$CERTIFICATE_P12_BASE64" | base64 --decode > "$certificate_path"
-          openssl pkcs12 \
+          # Apple's LibreSSL reads the certificate's legacy PKCS#12 encryption;
+          # the OpenSSL 3 that macOS 26 runners put first on PATH rejects it.
+          /usr/bin/openssl pkcs12 \
             -in "$certificate_path" \
             -clcerts \
             -nokeys \
