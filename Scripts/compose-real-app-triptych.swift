@@ -1,35 +1,49 @@
 #!/usr/bin/env swift
 
 import AppKit
+import CoreImage
 
-guard CommandLine.arguments.count == 5 else {
+// With --imitate-glass, the inputs are offscreen renders: transparent popover
+// content and a bare menu bar icon. The popover glass and the open-item
+// highlight are then imitated. Without it, the inputs are real screen captures.
+var arguments = Array(CommandLine.arguments.dropFirst())
+let imitatesGlass = arguments.first == "--imitate-glass"
+if imitatesGlass { arguments.removeFirst() }
+
+guard arguments.count == 7 else {
     fputs(
-        "usage: compose-real-app-triptych.swift DAY.png WEEK.png CUMULATIVE.png OUTPUT.png\n",
+        "usage: compose-real-app-triptych.swift [--imitate-glass] "
+            + "DAY-STATUS.png DAY-POPOVER.png WEEK-STATUS.png WEEK-POPOVER.png "
+            + "CUMULATIVE-STATUS.png CUMULATIVE-POPOVER.png OUTPUT.png\n",
         stderr)
     Foundation.exit(2)
 }
 
-let sourceURLs = CommandLine.arguments[1...3].map(URL.init(fileURLWithPath:))
-let outputURL = URL(fileURLWithPath: CommandLine.arguments[4])
-let sources = sourceURLs.compactMap {
-    NSImage(contentsOf: $0)?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+let images = arguments[0...5].compactMap {
+    NSImage(contentsOf: URL(fileURLWithPath: $0))?.cgImage(forProposedRect: nil, context: nil, hints: nil)
 }
+let outputURL = URL(fileURLWithPath: arguments[6])
 
-guard sources.count == 3 else {
+guard images.count == 6 else {
     fputs("Could not decode one or more source screenshots.\n", stderr)
     Foundation.exit(1)
 }
+/// Each panel's menu bar icon and popover, captured separately at any scale.
+let sources = stride(from: 0, to: 6, by: 2).map { (status: images[$0], popover: images[$0 + 1]) }
 
 let panelWidth = 650
 let outputWidth = panelWidth * 3
 let outputHeight = 888
 let panelLean: CGFloat = 30
 
-let captureScale: CGFloat = 0.68
 let outputTopBarHeight: CGFloat = 48
 let popoverTop: CGFloat = 48
-let sourceStatusRect = CGRect(x: 2_568, y: 0, width: 350, height: 88)
-let sourcePopoverRect = CGRect(x: 2_568, y: 90, width: 720, height: 1_190)
+let popoverBottomMargin: CGFloat = 24
+/// The popover's width and corner radius in points, used to derive capture density.
+let popoverPointWidth: CGFloat = 360
+let popoverCornerRadius: CGFloat = 15
+/// Popover size in the output, per point of the real popover.
+let preferredPointScale: CGFloat = 1.36
 
 func panelPath(index: Int) -> CGPath {
     let left = CGFloat(index * panelWidth)
@@ -150,6 +164,32 @@ func drawWallpaper(_ context: CGContext, index: Int, destination: CGRect) {
     context.strokePath()
 }
 
+/// The panel's wallpaper, heavily blurred, for the imitated glass.
+func blurredWallpaper(index: Int, destination: CGRect) -> CGImage? {
+    let width = Int(destination.width)
+    let height = Int(destination.height)
+    guard let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+        let graphics = NSGraphicsContext(bitmapImageRep: rep)
+    else { return nil }
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = graphics
+    let local = graphics.cgContext
+    local.translateBy(x: 0, y: CGFloat(height))
+    local.scaleBy(x: 1, y: -1)
+    local.translateBy(x: -destination.minX, y: 0)
+    drawWallpaper(local, index: index, destination: destination)
+    NSGraphicsContext.restoreGraphicsState()
+    guard let input = CIImage(bitmapImageRep: rep) else { return nil }
+    let blurred = input.clampedToExtent()
+        .applyingGaussianBlur(sigma: 28)
+        .cropped(to: input.extent)
+        .transformed(by: CGAffineTransform(scaleX: 1, y: -1).translatedBy(x: 0, y: -CGFloat(height)))
+    return CIContext().createCGImage(blurred, from: input.extent)
+}
+
 guard let bitmap = NSBitmapImageRep(
     bitmapDataPlanes: nil,
     pixelsWide: outputWidth,
@@ -190,56 +230,108 @@ for (index, source) in sources.enumerated() {
     context.clip()
 
     drawWallpaper(context, index: index, destination: destination)
+    // The last panel shows dark mode; the others light.
+    let isDark = index == sources.count - 1
 
-    context.setFillColor(NSColor.black.cgColor)
+    // A translucent menu bar over the wallpaper, like macOS 26.
+    context.setFillColor((isDark
+        ? NSColor(white: 0, alpha: 0.35)
+        : NSColor(white: 1, alpha: 0.35)).cgColor)
     context.fill(CGRect(
         x: destination.minX,
         y: 0,
         width: destination.width,
         height: outputTopBarHeight))
 
+    // Scale by points, not pixels, so 1x and 2x captures compose alike, and
+    // shrink if a tall popover would not fit below the menu bar.
+    let popover = source.popover
+    let pixelsPerPoint = CGFloat(popover.width) / popoverPointWidth
+    let fitHeight = (CGFloat(outputHeight) - popoverTop - popoverBottomMargin)
+        / (CGFloat(popover.height) / pixelsPerPoint)
+    let pointScale = min(preferredPointScale, fitHeight)
+    let imageScale = pointScale / pixelsPerPoint
     let panelCenterX = CGFloat(index * panelWidth) + CGFloat(panelWidth) / 2
     let popoverDestination = CGRect(
-        x: panelCenterX - sourcePopoverRect.width * captureScale / 2,
+        x: panelCenterX - CGFloat(popover.width) * imageScale / 2,
         y: popoverTop,
-        width: sourcePopoverRect.width * captureScale,
-        height: sourcePopoverRect.height * captureScale)
+        width: CGFloat(popover.width) * imageScale,
+        height: CGFloat(popover.height) * imageScale)
 
-    if let status = source.cropping(to: sourceStatusRect) {
-        let statusScale = outputTopBarHeight / sourceStatusRect.height
-        drawTopLeft(
-            context,
-            image: status,
-            destination: CGRect(
-                x: popoverDestination.minX,
-                y: 0,
-                width: sourceStatusRect.width * statusScale,
-                height: outputTopBarHeight))
-    }
-
-    if let popover = source.cropping(to: sourcePopoverRect) {
-        let popoverPath = CGPath(
-            roundedRect: popoverDestination,
-            cornerWidth: 12,
-            cornerHeight: 12,
-            transform: nil)
-
-        context.saveGState()
-        context.setShadow(
-            offset: CGSize(width: 0, height: 9),
-            blur: 18,
-            color: NSColor.black.withAlphaComponent(0.24).cgColor)
-        context.addPath(popoverPath)
-        context.setFillColor(NSColor.white.withAlphaComponent(0.95).cgColor)
+    // The menu bar icon at the popover's scale (both come from the same
+    // display density), centered in the menu bar and aligned with the popover.
+    let status = source.status
+    let statusSize = CGSize(
+        width: CGFloat(status.width) * imageScale,
+        height: CGFloat(status.height) * imageScale)
+    let statusDestination = CGRect(
+        x: popoverDestination.minX,
+        y: (outputTopBarHeight - statusSize.height) / 2,
+        width: statusSize.width,
+        height: statusSize.height)
+    if imitatesGlass {
+        // macOS highlights a menu bar item while its popover is open.
+        let pillHeight = 25 * pointScale
+        let pill = CGRect(
+            x: statusDestination.minX,
+            y: (outputTopBarHeight - pillHeight) / 2,
+            width: statusDestination.width,
+            height: pillHeight)
+        context.addPath(CGPath(
+            roundedRect: pill,
+            cornerWidth: pillHeight / 2,
+            cornerHeight: pillHeight / 2,
+            transform: nil))
+        context.setFillColor(NSColor.white.withAlphaComponent(isDark ? 0.16 : 0.4).cgColor)
         context.fillPath()
-        context.restoreGState()
+    }
+    drawTopLeft(context, image: status, destination: statusDestination)
 
+    let cornerRadius = popoverCornerRadius * pointScale
+    let popoverPath = CGPath(
+        roundedRect: popoverDestination,
+        cornerWidth: cornerRadius,
+        cornerHeight: cornerRadius,
+        transform: nil)
+
+    context.saveGState()
+    context.setShadow(
+        offset: CGSize(width: 0, height: 9),
+        blur: 18,
+        color: NSColor.black.withAlphaComponent(0.24).cgColor)
+    context.addPath(popoverPath)
+    context.setFillColor(imitatesGlass
+        ? NSColor.black.withAlphaComponent(0.01).cgColor
+        : NSColor.white.withAlphaComponent(0.95).cgColor)
+    context.fillPath()
+    context.restoreGState()
+
+    if imitatesGlass {
+        // Glass: the wallpaper behind the popover, blurred and tinted, with an edge highlight.
         context.saveGState()
         context.addPath(popoverPath)
         context.clip()
-        drawTopLeft(context, image: popover, destination: popoverDestination)
+        if let blurred = blurredWallpaper(index: index, destination: destination) {
+            drawTopLeft(context, image: blurred, destination: destination)
+        }
+        context.setFillColor((isDark
+            ? NSColor(white: 0.12, alpha: 0.62)
+            : NSColor(white: 0.97, alpha: 0.62)).cgColor)
+        context.fill(popoverDestination)
+        context.restoreGState()
+        context.saveGState()
+        context.addPath(popoverPath)
+        context.setStrokeColor(NSColor.white.withAlphaComponent(isDark ? 0.18 : 0.55).cgColor)
+        context.setLineWidth(1)
+        context.strokePath()
         context.restoreGState()
     }
+
+    context.saveGState()
+    context.addPath(popoverPath)
+    context.clip()
+    drawTopLeft(context, image: popover, destination: popoverDestination)
+    context.restoreGState()
 
     context.restoreGState()
 }

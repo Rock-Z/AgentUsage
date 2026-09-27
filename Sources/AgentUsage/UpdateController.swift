@@ -21,16 +21,16 @@ final class UpdateController: NSObject, ObservableObject, SPUUpdaterDelegate {
         installUpdate != nil || canCheckForUpdates
     }
 
-    override init() {
+    /// `startsUpdater: false` leaves Sparkle idle, for command-line modes and previews.
+    init(startsUpdater: Bool = !CommandLine.arguments.contains("--probe-once")) {
         super.init()
 
-        let isCommandMode = CommandLine.arguments.contains("--probe-once")
         controller = SPUStandardUpdaterController(
-            startingUpdater: !isCommandMode,
+            startingUpdater: startsUpdater,
             updaterDelegate: self,
             userDriverDelegate: nil)
 
-        if !isCommandMode {
+        if startsUpdater {
             applyUpdateDefaultsIfNeeded()
         }
 

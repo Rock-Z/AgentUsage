@@ -10,3 +10,6 @@ dist/
 *.p12
 *.provisionprofile
 *.mobileprovision
+
+# Raw screenshots from Scripts/capture-real-app-triptych.sh
+Assets/Previews/real-app-captures/

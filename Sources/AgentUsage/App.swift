@@ -22,6 +22,7 @@ struct AgentUsageApp: App {
                 updateController: updateController)
                 .frame(width: 360)
                 .fixedSize(horizontal: false, vertical: true)
+                .background(.regularMaterial)
         } label: {
             MenuBarLabelView(store: store)
         }
@@ -172,6 +173,11 @@ final class UsageStore: ObservableObject {
         start()
     }
 
+    /// Fixed states with no fetching, for rendering previews.
+    init(states: [Provider: ProviderState]) {
+        self.states = states
+    }
+
     func start() {
         refreshAll()
         restartTimer()
@@ -301,6 +307,10 @@ final class UsageStore: ObservableObject {
 struct MenuContentView: View {
     @ObservedObject var store: UsageStore
     @ObservedObject var updateController: UpdateController
+    /// The activity chart shown first; README previews pick each one.
+    var initialActivityPeriod = CodexActivityPeriod.daily
+    /// Shown beside the app name; previews render outside the app bundle.
+    var version = Self.bundleVersion
     @StateObject private var launchAtLoginController = LaunchAtLoginController()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("optionsExpanded") private var optionsExpanded = false
@@ -310,7 +320,7 @@ struct MenuContentView: View {
     private static let refreshIntervals = [5, 15, 30, 60, 300, 900, 1_800, 3_600]
     /// Popover width minus its horizontal padding.
     private static let contentWidth: CGFloat = 336
-    private static let currentVersion =
+    private static let bundleVersion =
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Dev"
     fileprivate static let periodPickerWidth: CGFloat = 252
 
@@ -350,7 +360,6 @@ struct MenuContentView: View {
             Divider()
             optionsSection
         }
-        .background(.regularMaterial)
         // The menu bar popover's corner radius (measured on macOS 26), so
         // concentric shapes such as the last row's highlight follow it.
         .containerShape(RoundedRectangle(cornerRadius: 15))
@@ -366,7 +375,7 @@ struct MenuContentView: View {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text("AgentUsage")
                     .font(.headline)
-                Text("v\(Self.currentVersion)")
+                Text("v\(version)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -402,7 +411,7 @@ struct MenuContentView: View {
             if provider == .codex,
                let activity = store.states[.codex]?.snapshot?.codexActivity
             {
-                CodexActivityView(activity: activity)
+                CodexActivityView(activity: activity, initialPeriod: initialActivityPeriod)
             }
         }
     }
@@ -1290,7 +1299,12 @@ enum CodexActivityPeriod: String, CaseIterable, Identifiable {
 
 private struct CodexActivityView: View {
     var activity: CodexActivitySnapshot
-    @State private var period = CodexActivityPeriod.daily
+    @State private var period: CodexActivityPeriod
+
+    init(activity: CodexActivitySnapshot, initialPeriod: CodexActivityPeriod) {
+        self.activity = activity
+        _period = State(initialValue: initialPeriod)
+    }
 
     var body: some View {
         VStack(spacing: ChartLayout.selectorSpacing) {

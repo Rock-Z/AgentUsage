@@ -43,39 +43,62 @@ func agentUsageWindows(layer: Int) -> [(CGRect, [String: Any])] {
     }
 }
 
-let utilityCommand = CommandLine.arguments.dropFirst().first
-if utilityCommand == "click-primary-status" {
-    guard let status = agentUsageWindows(layer: 25)
-        .map(\.0)
-        .first(where: { $0.midX >= 0 && $0.midX < 1_800 && $0.midY >= 0 })
-    else {
-        fputs("Could not find the primary-display AgentUsage status item.\n", stderr)
+/// The main display in global window coordinates (origin at its top-left).
+let mainDisplay = CGDisplayBounds(CGMainDisplayID())
+
+/// AgentUsage's status item on the main display (menu bar layer 25).
+func primaryStatusItem() -> CGRect? {
+    agentUsageWindows(layer: 25).map(\.0).first { mainDisplay.contains(CGPoint(x: $0.midX, y: $0.midY)) }
+}
+
+/// The open AgentUsage popover on the main display (layer 101).
+func primaryPopover() -> CGRect? {
+    agentUsageWindows(layer: 101).map(\.0).first { mainDisplay.intersects($0) }
+}
+
+func requirePrimaryStatusItem() -> CGRect {
+    guard let status = primaryStatusItem() else {
+        fputs(
+            "Could not find AgentUsage's menu bar icon on the main display. "
+                + "If the menu bar is crowded, macOS may be hiding it behind the notch; "
+                + "free up space or pin fewer providers, then try again.\n",
+            stderr)
         Foundation.exit(1)
     }
+    return status
+}
+
+let utilityCommand = CommandLine.arguments.dropFirst().first
+if utilityCommand == "click-primary-status" {
+    let status = requirePrimaryStatusItem()
     postClick(at: CGPoint(x: status.midX, y: status.midY))
     Foundation.exit(0)
 }
 
+// Prints `x,y,width,height` in points for `screencapture -R`, status item first.
+if utilityCommand == "geometry" {
+    let status = requirePrimaryStatusItem()
+    guard let popover = primaryPopover() else {
+        fputs("The AgentUsage popover is not open on the main display.\n", stderr)
+        Foundation.exit(1)
+    }
+    for rect in [status, popover] {
+        print([rect.minX, rect.minY, rect.width, rect.height].map { String(Int($0.rounded())) }.joined(separator: ","))
+    }
+    Foundation.exit(0)
+}
+
 if utilityCommand == "close-popover" {
-    if let popover = agentUsageWindows(layer: 101).map(\.0).first {
-        guard let status = agentUsageWindows(layer: 25)
-            .map(\.0)
-            .filter({ abs($0.minX - popover.minX) < 4 })
-            .min(by: { abs($0.midY - popover.minY) < abs($1.midY - popover.minY) })
-        else {
-            fputs("Could not find the status item attached to the open popover.\n", stderr)
-            Foundation.exit(1)
-        }
+    if primaryPopover() != nil {
+        let status = requirePrimaryStatusItem()
         postClick(at: CGPoint(x: status.midX, y: status.midY))
+        usleep(300_000)
     }
     Foundation.exit(0)
 }
 
 if utilityCommand == "assert-primary-popover" {
-    let found = agentUsageWindows(layer: 101)
-        .map(\.0)
-        .contains(where: { $0.midX >= 0 && $0.midX < 1_800 && $0.minY >= 0 })
-    Foundation.exit(found ? 0 : 1)
+    Foundation.exit(primaryPopover() == nil ? 1 : 0)
 }
 
 enum WallpaperStyle: String {
