@@ -7,18 +7,15 @@ AgentUsage intentionally does not require an Apple Developer Program membership.
 
 Neither mechanism notarizes the app or makes Gatekeeper identify it as coming from an Apple-verified developer.
 
-AgentUsage ships a narrowly scoped Claude usage helper. On first use, the app
-copies that helper to `~/Library/Application Support/AgentUsage/ClaudeUsageHelper-v1`
-and never replaces it. The helper reads Claude Code's access token, makes the
-fixed Anthropic usage request, and returns only the HTTP status, Retry-After
-header, non-secret subscription type, and original response body. The
-replaceable host app owns all response parsing.
-
-Do not rebuild or replace an installed v1 helper during ordinary app updates.
-Its exact executable identity is what macOS authorizes. If the credential shape,
-endpoint, or required request headers eventually make a helper change necessary,
-introduce a new versioned helper and document that it requires a new one-time
-authorization.
+AgentUsage ships a narrowly scoped Claude usage helper in
+`AgentUsage.app/Contents/Helpers` and always runs that bundled copy. The helper
+reads Claude Code's access token through `/usr/bin/security`, so Keychain access
+is granted to Apple's stable tool rather than to the helper's own changing
+identity. It makes the fixed Anthropic usage request and, when the app asks
+(at most hourly), the account profile request for the plan name. It writes one
+JSON line with the HTTP status, Retry-After header, and non-secret plan fields,
+followed by the original response body; the token never leaves the helper. The
+host app owns all response parsing.
 
 Because a self-signed certificate has no Apple TeamIdentifier, the host app carries `com.apple.security.cs.disable-library-validation` so it can load the separately signed Sparkle framework. The hardened runtime remains enabled for the app, framework, and updater helpers.
 
@@ -90,7 +87,7 @@ Delete the temporary exported secret files after the GitHub secrets and offline 
 ## Release invariants
 
 - Never replace either signing identity without planning a migration.
-- Never replace an existing `ClaudeUsageHelper-v1` executable.
+- Build against the macOS 26 SDK or later; `Scripts/verify-app.sh` fails otherwise, because older SDKs make macOS draw the app without Liquid Glass.
 - Increment `CFBundleVersion` for every release.
 - Match the Git tag to `CFBundleShortVersionString`.
 - Build v0.4.3 or later with the stable signing certificate.

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="AgentUsage"
 CONFIGURATION="release"
-APP_DIR="$ROOT_DIR/.build/$CONFIGURATION/$APP_NAME.app"
+APP_DIR="$ROOT_DIR/.build/app/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -13,11 +13,15 @@ HELPERS_DIR="$CONTENTS_DIR/Helpers"
 ICON_SOURCE="$ROOT_DIR/Assets/AgentUsage.icns"
 
 cd "$ROOT_DIR"
+# The native build system records the real SDK version in the binary. macOS
+# only gives apps linked against SDK 26 or later the Liquid Glass appearance.
+BUILD_FLAGS=(-c "$CONFIGURATION" --build-system native --scratch-path "$ROOT_DIR/.build/native")
+PRODUCTS_DIR="$ROOT_DIR/.build/native/$CONFIGURATION"
 if [[ -n "${AGENTUSAGE_EXECUTABLE:-}" ]]; then
   EXECUTABLE="$AGENTUSAGE_EXECUTABLE"
 else
-  swift build -c "$CONFIGURATION" --product "$APP_NAME"
-  EXECUTABLE="$ROOT_DIR/.build/$CONFIGURATION/$APP_NAME"
+  swift build "${BUILD_FLAGS[@]}" --product "$APP_NAME"
+  EXECUTABLE="$PRODUCTS_DIR/$APP_NAME"
 fi
 
 if [[ ! -x "$EXECUTABLE" ]]; then
@@ -29,8 +33,8 @@ if [[ -n "${AGENTUSAGE_CLAUDE_HELPER:-}" ]]; then
   CLAUDE_HELPER="$AGENTUSAGE_CLAUDE_HELPER"
 else
   # Never package a helper left over from an earlier release build.
-  swift build -c "$CONFIGURATION" --product AgentUsageClaudeHelper
-  CLAUDE_HELPER="$ROOT_DIR/.build/$CONFIGURATION/AgentUsageClaudeHelper"
+  swift build "${BUILD_FLAGS[@]}" --product AgentUsageClaudeHelper
+  CLAUDE_HELPER="$PRODUCTS_DIR/AgentUsageClaudeHelper"
 fi
 if [[ ! -x "$CLAUDE_HELPER" ]]; then
   echo "Claude credential helper not found: $CLAUDE_HELPER" >&2

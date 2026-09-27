@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
 
@@ -73,17 +73,22 @@ jobs:
           echo "AGENTUSAGE_SIGNING_IDENTITY=AgentUsage Code Signing" >> "$GITHUB_ENV"
           echo "AGENTUSAGE_SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
 
+      - name: Run tests
+        run: swift test
+
       - name: Build universal app
         shell: bash
         run: |
           set -euo pipefail
-          swift build -c release --product AgentUsage \
+          # The native build system records the real SDK version, which macOS
+          # needs for the Liquid Glass appearance, and uses these product paths.
+          swift build -c release --build-system native --product AgentUsage \
             --triple arm64-apple-macosx14.0 --scratch-path .build/arm64
-          swift build -c release --product AgentUsageClaudeHelper \
+          swift build -c release --build-system native --product AgentUsageClaudeHelper \
             --triple arm64-apple-macosx14.0 --scratch-path .build/arm64
-          swift build -c release --product AgentUsage \
+          swift build -c release --build-system native --product AgentUsage \
             --triple x86_64-apple-macosx14.0 --scratch-path .build/x86_64
-          swift build -c release --product AgentUsageClaudeHelper \
+          swift build -c release --build-system native --product AgentUsageClaudeHelper \
             --triple x86_64-apple-macosx14.0 --scratch-path .build/x86_64
           mkdir -p .build/universal
           lipo -create \
@@ -101,7 +106,7 @@ jobs:
 
       - name: Verify app bundle
         shell: bash
-        run: ./Scripts/verify-app.sh .build/release/AgentUsage.app
+        run: ./Scripts/verify-app.sh .build/app/AgentUsage.app
 
       - name: Package release
         env:
@@ -111,10 +116,10 @@ jobs:
           set -euo pipefail
           test -n "$SPARKLE_ED_PRIVATE_KEY"
           mkdir -p dist
-          ditto -c -k --keepParent .build/release/AgentUsage.app dist/AgentUsage-macos-universal.zip
+          ditto -c -k --keepParent .build/app/AgentUsage.app dist/AgentUsage-macos-universal.zip
           dmg_root="$RUNNER_TEMP/AgentUsage-dmg"
           mkdir -p "$dmg_root"
-          ditto .build/release/AgentUsage.app "$dmg_root/AgentUsage.app"
+          ditto .build/app/AgentUsage.app "$dmg_root/AgentUsage.app"
           ln -s /Applications "$dmg_root/Applications"
           hdiutil create \
             -volname AgentUsage \

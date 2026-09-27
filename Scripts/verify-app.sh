@@ -34,4 +34,12 @@ test -n "$(plutil -extract SUPublicEDKey raw "$INFO_PLIST")"
 test "$(plutil -extract SUEnableAutomaticChecks raw "$INFO_PLIST")" = "true"
 test "$(plutil -extract SUVerifyUpdateBeforeExtraction raw "$INFO_PLIST")" = "true"
 
+# Binaries linked against an SDK before 26 run in a legacy compatibility
+# appearance (no Liquid Glass) on current macOS.
+sdk_major="$(otool -l "$EXECUTABLE" | awk '/LC_BUILD_VERSION/ { found = 1 } found && $1 == "sdk" { split($2, v, "."); print v[1]; exit }')"
+if [[ -z "$sdk_major" || "$sdk_major" -lt 26 ]]; then
+  echo "AgentUsage must be linked against macOS SDK 26 or later (found ${sdk_major:-none})" >&2
+  exit 1
+fi
+
 echo "Verified $APP_PATH"
