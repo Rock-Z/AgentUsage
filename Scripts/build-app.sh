@@ -90,9 +90,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.4.7</string>
+  <string>0.5.0</string>
   <key>CFBundleVersion</key>
-  <string>13</string>
+  <string>14</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>LSMultipleInstancesProhibited</key>
