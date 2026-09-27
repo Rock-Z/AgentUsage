@@ -4,15 +4,41 @@ private let keychainService = "Claude Code-credentials"
 private let keychainReadTimeout: TimeInterval = 5
 private let usageEndpoint =
     URL(string: "https://api.anthropic.com/api/oauth/usage")!
+private let profileEndpoint =
+    URL(string: "https://api.anthropic.com/api/oauth/profile")!
 
 private func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data(message.utf8))
     exit(1)
 }
 
-private struct Credential {
-    var accessToken: String
+/// Written as the first output line; the raw usage body follows it.
+private struct Header: Encodable {
+    var status: Int
+    var retryAfter: String?
     var subscriptionType: String?
+    var rateLimitTier: String?
+}
+
+private func livePlan(accessToken: String) async -> (subscriptionType: String, rateLimitTier: String?)? {
+    var request = URLRequest(url: profileEndpoint)
+    request.timeoutInterval = 4
+    request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+    request.cachePolicy = .reloadIgnoringLocalCacheData
+    guard let (data, response) = try? await URLSession.shared.data(for: request),
+          (response as? HTTPURLResponse)?.statusCode == 200,
+          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let organization = root["organization"] as? [String: Any],
+          let type = organization["organization_type"] as? String,
+          !type.isEmpty
+    else { return nil }
+    // Take both fields from the same live profile; never pair a new plan with
+    // an old cached tier after an upgrade or downgrade.
+    return (
+        type.hasPrefix("claude_") ? String(type.dropFirst(7)) : type,
+        organization["rate_limit_tier"] as? String)
 }
 
 private func keychainData() -> Data {
@@ -39,17 +65,14 @@ private func keychainData() -> Data {
                 + "(could not launch macOS Keychain access).")
     }
 
-    let deadline = Date().addingTimeInterval(keychainReadTimeout)
-    while process.isRunning, Date() < deadline {
-        Thread.sleep(forTimeInterval: 0.02)
-    }
-    if process.isRunning {
-        process.terminate()
-        process.waitUntilExit()
+    let timeout = DispatchWorkItem { if process.isRunning { process.terminate() } }
+    DispatchQueue.global().asyncAfter(deadline: .now() + keychainReadTimeout, execute: timeout)
+    let data = stdout.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    timeout.cancel()
+    if process.terminationReason == .uncaughtSignal {
         fail("Claude credential is unavailable (Keychain access timed out).")
     }
-
-    let data = stdout.fileHandleForReading.readDataToEndOfFile()
     guard process.terminationStatus == 0, !data.isEmpty else {
         fail(
             "Claude credential is unavailable "
@@ -58,10 +81,9 @@ private func keychainData() -> Data {
     return data
 }
 
-private func credential() -> Credential {
-    let data = keychainData()
+private func accessToken() -> String {
     guard
-        let root = try? JSONSerialization.jsonObject(with: data)
+        let root = try? JSONSerialization.jsonObject(with: keychainData())
             as? [String: Any],
         let oauth = root["claudeAiOauth"] as? [String: Any],
         let accessToken = oauth["accessToken"] as? String,
@@ -69,43 +91,36 @@ private func credential() -> Credential {
     else {
         fail("Claude credential does not contain an OAuth access token.")
     }
-    let subscriptionType = (oauth["subscriptionType"] as? String)?
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-    return Credential(
-        accessToken: accessToken,
-        subscriptionType: subscriptionType?.isEmpty == false
-            ? subscriptionType
-            : nil)
+    return accessToken
 }
 
 private func run() async {
-    let credential = credential()
+    let token = accessToken()
+    let includePlan = CommandLine.arguments.contains("--plan")
+    // Fetch concurrently so profile availability does not delay usage by the
+    // sum of both request timeouts. Profile failures must not hide usage.
+    async let profile = includePlan ? livePlan(accessToken: token) : nil
     var request = URLRequest(url: usageEndpoint)
     request.httpMethod = "GET"
     request.timeoutInterval = 8
-    request.setValue(
-        "Bearer \(credential.accessToken)",
-        forHTTPHeaderField: "Authorization")
+    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.setValue(
-        "oauth-2025-04-20",
-        forHTTPHeaderField: "anthropic-beta")
-    request.setValue(
-        "claude-code/2.1.0",
-        forHTTPHeaderField: "User-Agent")
+    request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+    request.setValue("claude-code/2.1.0", forHTTPHeaderField: "User-Agent")
 
     do {
         let (body, response) = try await URLSession.shared.data(for: request)
         guard let response = response as? HTTPURLResponse else {
             fail("Claude usage request returned no HTTP response.")
         }
-        let retryAfter =
-            response.value(forHTTPHeaderField: "Retry-After") ?? ""
-        let header = "\(response.statusCode)\n\(retryAfter)\n"
-            + "\(credential.subscriptionType ?? "")\n"
-        FileHandle.standardOutput.write(
-            Data(header.utf8))
+        let plan = await profile
+        let header = Header(
+            status: response.statusCode,
+            retryAfter: response.value(forHTTPHeaderField: "Retry-After"),
+            subscriptionType: plan?.subscriptionType,
+            rateLimitTier: plan?.rateLimitTier)
+        FileHandle.standardOutput.write(try JSONEncoder().encode(header) + Data([0x0A]))
         FileHandle.standardOutput.write(body)
     } catch {
         fail("Claude usage request failed: \(error.localizedDescription)")

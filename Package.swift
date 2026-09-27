@@ -25,4 +25,7 @@ let package = Package(
             ]),
         .executableTarget(
             name: "AgentUsageClaudeHelper"),
+        .testTarget(
+            name: "AgentUsageTests",
+            dependencies: ["AgentUsage"]),
     ])

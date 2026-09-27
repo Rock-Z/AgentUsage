@@ -34,5 +34,4 @@ test -n "$(plutil -extract SUPublicEDKey raw "$INFO_PLIST")"
 test "$(plutil -extract SUEnableAutomaticChecks raw "$INFO_PLIST")" = "true"
 test "$(plutil -extract SUVerifyUpdateBeforeExtraction raw "$INFO_PLIST")" = "true"
 
-"$EXECUTABLE" --self-test
 echo "Verified $APP_PATH"

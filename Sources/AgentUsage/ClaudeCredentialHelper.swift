@@ -4,6 +4,7 @@ struct ClaudeHelperResponse: Sendable {
     var statusCode: Int
     var retryAfter: String?
     var subscriptionType: String?
+    var rateLimitTier: String?
     var body: Data
 }
 
@@ -11,48 +12,37 @@ enum ClaudeCredentialHelper {
     private static let executableName = "AgentUsageClaudeHelper"
     private static let timeout: TimeInterval = 12
 
-    static func fetch() async throws -> ClaudeHelperResponse {
+    /// With `includePlan`, the helper also reads the live OAuth profile.
+    static func fetch(includePlan: Bool) async throws -> ClaudeHelperResponse {
         let executable = try bundledExecutable()
         return try await Task.detached(priority: .utility) {
-            try run(executable: executable)
+            try run(executable: executable, arguments: includePlan ? ["--plan"] : [])
         }.value
     }
 
+    /// The helper writes one JSON header line, then the raw usage response body.
     static func parse(_ output: Data) throws -> ClaudeHelperResponse {
-        guard let firstNewline = output.firstIndex(of: 0x0A),
-              let secondNewline = output[
-                output.index(after: firstNewline)...
-              ].firstIndex(of: 0x0A),
-              let thirdNewline = output[
-                output.index(after: secondNewline)...
-              ].firstIndex(of: 0x0A),
-              let statusCode = Int(
-                String(decoding: output[..<firstNewline], as: UTF8.self))
+        struct Header: Decodable {
+            var status: Int
+            var retryAfter: String?
+            var subscriptionType: String?
+            var rateLimitTier: String?
+        }
+        guard let newline = output.firstIndex(of: 0x0A),
+              let header = try? JSONDecoder().decode(Header.self, from: output[..<newline])
         else {
             throw FetchError.parseFailed(
                 "invalid Claude credential helper response framing")
         }
-
-        let retryStart = output.index(after: firstNewline)
-        let retryAfter = String(
-            decoding: output[retryStart..<secondNewline],
-            as: UTF8.self)
-        let subscriptionStart = output.index(after: secondNewline)
-        let subscriptionType = String(
-            decoding: output[subscriptionStart..<thirdNewline],
-            as: UTF8.self)
-        let bodyStart = output.index(after: thirdNewline)
         return ClaudeHelperResponse(
-            statusCode: statusCode,
-            retryAfter: retryAfter.isEmpty ? nil : retryAfter,
-            subscriptionType: subscriptionType.isEmpty
-                ? nil
-                : subscriptionType,
-            body: Data(output[bodyStart...]))
+            statusCode: header.status,
+            retryAfter: header.retryAfter,
+            subscriptionType: header.subscriptionType,
+            rateLimitTier: header.rateLimitTier,
+            body: Data(output[output.index(after: newline)...]))
     }
 
     private static func bundledExecutable() throws -> URL {
-        let fileManager = FileManager.default
         // The helper delegates Keychain access to /usr/bin/security, so it no
         // longer needs a preserved on-disk identity. Always use the bundled
         // copy to prevent an older helper from surviving an app update.
@@ -61,7 +51,7 @@ enum ClaudeCredentialHelper {
             .deletingLastPathComponent()
             .appendingPathComponent("Helpers", isDirectory: true)
             .appendingPathComponent(executableName),
-            fileManager.isExecutableFile(atPath: bundled.path)
+            FileManager.default.isExecutableFile(atPath: bundled.path)
         else {
             throw FetchError.launchFailed(
                 "bundled Claude credential helper is missing")
@@ -69,11 +59,12 @@ enum ClaudeCredentialHelper {
         return bundled
     }
 
-    private static func run(executable: URL) throws -> ClaudeHelperResponse {
+    private static func run(executable: URL, arguments: [String]) throws -> ClaudeHelperResponse {
         let process = Process()
         let stdout = Pipe()
         let stderr = Pipe()
         process.executableURL = executable
+        process.arguments = arguments
         process.standardOutput = stdout
         process.standardError = stderr
         process.currentDirectoryURL = executable.deletingLastPathComponent()
@@ -90,17 +81,13 @@ enum ClaudeCredentialHelper {
                 "Claude credential helper: \(error.localizedDescription)")
         }
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning, Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.02)
-        }
-        if process.isRunning {
-            process.terminate()
-            throw FetchError.timeout("Claude credential helper")
-        }
-
+        let timedOut = IsolatedProcess.terminate(process, after: timeout)
         let output = stdout.fileHandleForReading.readDataToEndOfFile()
         let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        if timedOut() {
+            throw FetchError.timeout("Claude credential helper")
+        }
         guard process.terminationStatus == 0 else {
             let message = String(decoding: errorData, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)

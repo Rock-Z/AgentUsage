@@ -1,9 +1,5 @@
 import Foundation
 
-#if canImport(Security)
-import Security
-#endif
-
 enum FetchError: LocalizedError {
     case binaryNotFound(String)
     case launchFailed(String)
@@ -37,25 +33,10 @@ enum BinaryLocator {
         if name.contains("/"), fileManager.isExecutableFile(atPath: name) {
             return name
         }
-        var candidates = (env["PATH"] ?? "").split(separator: ":").map(String.init)
-        let home = env["HOME"] ?? NSHomeDirectory()
-        candidates.append(contentsOf: [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "\(home)/.local/bin",
-            "\(home)/.npm-global/bin",
-            "\(home)/.bun/bin",
-        ])
-        candidates.append(contentsOf: versionManagerBins(home: home))
-        for dir in candidates {
-            let path = URL(fileURLWithPath: dir).appendingPathComponent(name).path
-            if fileManager.isExecutableFile(atPath: path) {
-                return path
-            }
-        }
-        return nil
+        let directories = (enrichedEnvironment(env)["PATH"] ?? "").split(separator: ":")
+        return directories
+            .map { URL(fileURLWithPath: String($0)).appendingPathComponent(name).path }
+            .first(where: fileManager.isExecutableFile(atPath:))
     }
 
     static func enrichedEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
@@ -111,9 +92,8 @@ struct CodexUsageFetcher: UsageFetching {
     func fetch() async throws -> UsageSnapshot {
         do {
             return try await fetchOnce()
-        } catch {
-            guard CodexCredentialRepairTrigger.matches(error: error)
-            else { throw error }
+        } catch FetchError.timeout("initialize") {
+            // A stale credential makes app-server hang during initialize.
             try await CodexCredentialRepairer.shared.cycle(
                 environment: environment)
             return try await fetchOnce()
@@ -124,67 +104,61 @@ struct CodexUsageFetcher: UsageFetching {
         let rpc = try CodexRPCClient(environment: environment)
         defer { rpc.shutdown() }
         try await rpc.initialize()
-        let rateLimitsResponse = try await rpc.fetchRateLimits()
-        let limits = rateLimitsResponse.rateLimits
-        let account = try? await rpc.fetchAccount()
+        let response = try await rpc.fetchRateLimits()
         let activity = try? await CodexActivityCache.shared.fetch(using: rpc)
-        let resetExpirationDetails = try? await CodexResetExpirationFetcher(environment: environment).fetch()
-        let resetCredits = rateLimitsResponse.rateLimitResetCredits.map {
-            ResetCreditSnapshot(
-                availableCount: $0.availableCount,
-                credits: resetExpirationDetails ?? [])
-        }
-        let classifiedWindows = Self.classifyWindows(
-            [limits.primary, limits.secondary].compactMap(Self.makeWindow))
-        let now = Date()
         return UsageSnapshot(
             provider: .codex,
-            fiveHour: classifiedWindows.short,
-            sevenDay: classifiedWindows.long,
-            credits: limits.credits?.snapshot,
-            resetCredits: resetCredits,
-            accountEmail: account?.email,
-            plan: account?.plan ?? limits.planType,
+            limits: response.limits,
+            credits: response.rateLimits.credits?.snapshot,
+            resetCredits: response.rateLimitResetCredits.map {
+                ResetCreditSnapshot(availableCount: $0.availableCount, credits: $0.credits ?? [])
+            },
+            // Usage is a live server response; account/read can reflect old sign-in metadata.
+            plan: PlanNames.codex(response.rateLimits.planType),
             codexActivity: activity,
-            source: "codex app-server",
-            updatedAt: now)
-    }
-
-    private static func makeWindow(_ rpc: CodexRateLimitWindow?) -> RateWindow? {
-        guard let rpc else { return nil }
-        return RateWindow(
-            usedPercent: rpc.usedPercent,
-            windowMinutes: rpc.windowDurationMins,
-            resetsAt: rpc.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) },
-            resetDescription: nil)
-    }
-
-    static func classifyWindows(_ windows: [RateWindow]) -> (short: RateWindow?, long: RateWindow?) {
-        let sorted = windows.sorted { lhs, rhs in
-            switch (lhs.windowMinutes, rhs.windowMinutes) {
-            case let (lhsMinutes?, rhsMinutes?): lhsMinutes < rhsMinutes
-            case (_?, nil): true
-            case (nil, _?): false
-            case (nil, nil): false
-            }
-        }
-        guard let first = sorted.first else { return (nil, nil) }
-        if sorted.count > 1 {
-            return (first, sorted.last)
-        }
-
-        // A lone window is placed by its scale because the backend may collapse a
-        // weekly window into `primary` when no shorter window applies.
-        if let minutes = first.windowMinutes, minutes >= 24 * 60 {
-            return (nil, first)
-        }
-        return (first, nil)
+            updatedAt: Date())
     }
 }
 
-private struct CodexRateLimitsResponse: Decodable {
+struct CodexRateLimitsResponse: Decodable {
+    struct ResetCredits: Decodable {
+        let availableCount: Int
+        let credits: [ResetCredit]?
+    }
+
+    /// The account's main limit; also carries plan and credits.
     let rateLimits: CodexRateLimitSnapshot
-    let rateLimitResetCredits: CodexResetCreditsSummary?
+    /// Every limit, including model-specific ones, keyed by limit id.
+    let rateLimitsByLimitId: [String: CodexRateLimitSnapshot]?
+    let rateLimitResetCredits: ResetCredits?
+
+    /// One entry per reported window, main limit first. Titles combine the
+    /// window length with the limit's own name, e.g. "7d" or "7d gpt-reserve".
+    var limits: [UsageLimit] {
+        let mainID = rateLimits.limitId ?? "codex"
+        var byID = rateLimitsByLimitId ?? [:]
+        byID[mainID] = byID[mainID] ?? rateLimits
+        let ids = [mainID] + byID.keys.filter { $0 != mainID }.sorted()
+        return ids.flatMap { id -> [UsageLimit] in
+            guard let snapshot = byID[id] else { return [] }
+            let name = id == mainID
+                ? nil
+                : snapshot.limitName ?? snapshot.normalModelSlug ?? humanizedIdentifier(id)
+            return [("primary", snapshot.primary), ("secondary", snapshot.secondary)]
+                .compactMap { slot, window in window.map { (slot, $0) } }
+                .sorted { ($0.1.windowDurationMins ?? .max) < ($1.1.windowDurationMins ?? .max) }
+                .map { slot, window in
+                    let duration = window.windowDurationMins.map(UsageLimit.durationLabel(minutes:))
+                    return UsageLimit(
+                        id: "\(id).\(slot)",
+                        title: [duration ?? (name == nil ? "Limit" : nil), name]
+                            .compactMap { $0 }.joined(separator: " "),
+                        usedPercent: max(0, min(100, window.usedPercent)),
+                        resetsAt: window.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) },
+                        scope: name)
+                }
+        }
+    }
 }
 
 struct CodexAccountUsageResponse: Decodable {
@@ -217,171 +191,38 @@ struct CodexAccountUsageResponse: Decodable {
     }
 }
 
-private struct CodexRateLimitSnapshot: Decodable {
+struct CodexRateLimitSnapshot: Decodable {
+    let limitId: String?
+    let limitName: String?
+    let normalModelSlug: String?
     let primary: CodexRateLimitWindow?
     let secondary: CodexRateLimitWindow?
     let planType: String?
     let credits: CodexCredits?
 }
 
-private struct CodexRateLimitWindow: Decodable {
+struct CodexRateLimitWindow: Decodable {
     let usedPercent: Double
     let windowDurationMins: Int?
     let resetsAt: Int?
 }
 
-private struct CodexCredits: Decodable {
+struct CodexCredits: Decodable {
     let balance: Double?
-    let hasCredits: Bool
     let unlimited: Bool
 
     var snapshot: CreditSnapshot {
-        CreditSnapshot(balance: balance, hasCredits: hasCredits, unlimited: unlimited)
+        CreditSnapshot(balance: balance, unlimited: unlimited)
     }
 
+    private enum CodingKeys: CodingKey { case balance, unlimited }
+
+    // The balance arrives as either a string or a number.
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: DynamicCodingKey.self)
-        if let string = try? container.decode(String.self, forKey: DynamicCodingKey("balance")) {
-            self.balance = Double(string)
-        } else {
-            self.balance = try? container.decode(Double.self, forKey: DynamicCodingKey("balance"))
-        }
-        self.hasCredits = (try? container.decode(Bool.self, forKey: DynamicCodingKey("hasCredits"))) ?? false
-        self.unlimited = (try? container.decode(Bool.self, forKey: DynamicCodingKey("unlimited"))) ?? false
-    }
-}
-
-private struct CodexResetCreditsSummary: Decodable {
-    let availableCount: Int
-
-    var snapshot: ResetCreditSnapshot {
-        ResetCreditSnapshot(availableCount: availableCount, credits: [])
-    }
-}
-
-private struct CodexAuthFile: Decodable {
-    struct Tokens: Decodable {
-        let accessToken: String
-        let accountID: String
-
-        enum CodingKeys: String, CodingKey {
-            case accessToken = "access_token"
-            case accountID = "account_id"
-        }
-    }
-
-    let tokens: Tokens
-}
-
-private struct CodexResetCreditsResponse: Decodable {
-    let credits: [CodexResetCredit]
-}
-
-private struct CodexResetCredit: Decodable {
-    let resetType: String?
-    let status: String
-    let grantedAt: Date?
-    let expiresAt: Date?
-    let title: String?
-    let description: String?
-
-    enum CodingKeys: String, CodingKey {
-        case resetType = "reset_type"
-        case status
-        case grantedAt = "granted_at"
-        case expiresAt = "expires_at"
-        case title
-        case description
-    }
-
-    var snapshot: ResetCredit {
-        ResetCredit(
-            resetType: resetType,
-            status: status,
-            grantedAt: grantedAt,
-            expiresAt: expiresAt,
-            title: title,
-            description: description)
-    }
-}
-
-private struct CodexResetExpirationFetcher {
-    var environment: [String: String]
-
-    func fetch() async throws -> [ResetCredit] {
-        let auth = try readAuthFile()
-        guard let url = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits") else {
-            throw FetchError.malformed("invalid reset-credit endpoint")
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 4
-        request.setValue("Bearer \(auth.tokens.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(auth.tokens.accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("AgentUsage", forHTTPHeaderField: "User-Agent")
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw FetchError.malformed("missing reset-credit HTTP response")
-        }
-        guard http.statusCode == 200 else {
-            throw FetchError.malformed("reset-credit endpoint returned HTTP \(http.statusCode)")
-        }
-
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .custom { decoder in
-            let container = try decoder.singleValueContainer()
-            let raw = try container.decode(String.self)
-            if let date = Self.isoDate(raw) { return date }
-            throw DecodingError.dataCorruptedError(
-                in: container,
-                debugDescription: "Invalid ISO date: \(raw)")
-        }
-        return try decoder.decode(CodexResetCreditsResponse.self, from: data).credits.map(\.snapshot)
-    }
-
-    private func readAuthFile() throws -> CodexAuthFile {
-        let home = environment["HOME"] ?? NSHomeDirectory()
-        let url = URL(fileURLWithPath: home)
-            .appendingPathComponent(".codex/auth.json")
-        do {
-            let data = try Data(contentsOf: url)
-            return try JSONDecoder().decode(CodexAuthFile.self, from: data)
-        } catch {
-            throw FetchError.malformed("could not read Codex auth for reset credits")
-        }
-    }
-
-    private static func isoDate(_ string: String) -> Date? {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: string) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: string)
-    }
-}
-
-private struct CodexAccountResponse: Decodable {
-    struct ChatGPTAccount: Decodable {
-        let email: String?
-        let plan: String?
-    }
-
-    let email: String?
-    let plan: String?
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: DynamicCodingKey.self)
-        if let account = try? container.decode([String: ChatGPTAccount].self, forKey: DynamicCodingKey("account")),
-           let chatgpt = account["chatgpt"] {
-            self.email = chatgpt.email
-            self.plan = chatgpt.plan
-            return
-        }
-        self.email = try? container.decode(String.self, forKey: DynamicCodingKey("email"))
-        self.plan = try? container.decode(String.self, forKey: DynamicCodingKey("plan"))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        balance = (try? container.decode(String.self, forKey: .balance)).flatMap(Double.init)
+            ?? (try? container.decode(Double.self, forKey: .balance))
+        unlimited = (try? container.decode(Bool.self, forKey: .unlimited)) ?? false
     }
 }
 
@@ -472,7 +313,7 @@ private final class CodexRPCClient: @unchecked Sendable {
         // surfaces here as the misleading "closed stdout" error.
         process.arguments = [binary, "app-server", "--stdio"]
         process.environment = BinaryLocator.enrichedEnvironment(environment)
-        process.currentDirectoryURL = Self.probeDirectory()
+        process.currentDirectoryURL = IsolatedProcess.directory(named: "AgentUsage-CodexProbe")
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
@@ -505,13 +346,6 @@ private final class CodexRPCClient: @unchecked Sendable {
         }
     }
 
-    private static func probeDirectory() -> URL {
-        let url = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("AgentUsage-CodexProbe", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        return url
-    }
-
     func initialize() async throws {
         _ = try await request(
             method: "initialize",
@@ -522,10 +356,6 @@ private final class CodexRPCClient: @unchecked Sendable {
 
     func fetchRateLimits() async throws -> CodexRateLimitsResponse {
         try await decodeResult(from: request(method: "account/rateLimits/read", timeout: 3))
-    }
-
-    func fetchAccount() async throws -> CodexAccountResponse {
-        try await decodeResult(from: request(method: "account/read", timeout: 3))
     }
 
     func fetchAccountUsage() async throws -> CodexAccountUsageResponse {
@@ -607,24 +437,20 @@ private final class CodexRPCClient: @unchecked Sendable {
             throw FetchError.malformed("missing result")
         }
         let data = try JSONSerialization.data(withJSONObject: result)
-        return try JSONDecoder().decode(T.self, from: data)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        return try decoder.decode(T.self, from: data)
     }
 }
 
 struct ClaudeUsageFetcher: UsageFetching {
+    private static let gate = ClaudeOAuthUsageRateLimitGate()
+    private static let planLifetime: TimeInterval = 60 * 60
+
     var environment: [String: String] = ProcessInfo.processInfo.environment
 
     func fetch() async throws -> UsageSnapshot {
-        try await ClaudeOAuthUsageFetcher.fetch(environment: environment)
-    }
-}
-
-enum ClaudeOAuthUsageFetcher {
-    private static let gate = ClaudeOAuthUsageRateLimitGate()
-
-    static func fetch(
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) async throws -> UsageSnapshot {
+        let gate = Self.gate
         switch await gate.decision() {
         case let .cached(snapshot):
             return snapshot
@@ -634,18 +460,16 @@ enum ClaudeOAuthUsageFetcher {
             break
         }
 
-        var response = try await ClaudeCredentialHelper.fetch()
-        response = try await responseAfterDelegatedRefreshIfNeeded(
-            response,
-            refresh: {
-                await ClaudeOAuthRefreshCoordinator.shared.refresh(
-                    environment: environment)
-            },
-            retry: {
-                try await ClaudeCredentialHelper.fetch()
-            })
+        // Plans change rarely; skip the profile request while the label is fresh.
+        let includePlan = await gate.planNeedsRefresh(lifetime: Self.planLifetime)
+        var response = try await ClaudeCredentialHelper.fetch(includePlan: includePlan)
+        if response.statusCode == 401,
+           await ClaudeOAuthRefreshCoordinator.shared.refresh(environment: environment)
+        {
+            response = try await ClaudeCredentialHelper.fetch(includePlan: includePlan)
+        }
         if response.statusCode == 429 {
-            let retryAfter = retryAfterDate(from: response.retryAfter)
+            let retryAfter = Self.retryAfterDate(from: response.retryAfter)
             if let cached = await gate.recordRateLimit(retryAfter: retryAfter) {
                 return cached
             }
@@ -659,80 +483,77 @@ enum ClaudeOAuthUsageFetcher {
             throw FetchError.malformed(
                 "Claude OAuth returned HTTP \(response.statusCode)")
         }
-        let snapshot = try snapshot(
-            from: response.body,
-            subscriptionType: response.subscriptionType)
+        let plan = if includePlan {
+            await gate.recordPlan(
+                PlanNames.claude(response.subscriptionType, rateLimitTier: response.rateLimitTier),
+                lookupSucceeded: response.subscriptionType != nil)
+        } else {
+            await gate.cachedPlan()
+        }
+        let snapshot = try Self.snapshot(from: response.body, plan: plan)
         await gate.recordSuccess(snapshot)
         return snapshot
     }
 
-    static func responseAfterDelegatedRefreshIfNeeded(
-        _ response: ClaudeHelperResponse,
-        refresh: @Sendable () async -> Bool,
-        retry: @Sendable () async throws -> ClaudeHelperResponse
-    ) async throws -> ClaudeHelperResponse {
-        guard ClaudeOAuthRefreshPolicy.shouldAttempt(
-            statusCode: response.statusCode,
-            alreadyAttempted: false),
-            await refresh()
-        else {
-            return response
-        }
-        return try await retry()
-    }
-
     static func snapshot(
         from data: Data,
-        subscriptionType: String? = nil,
+        plan: String? = nil,
         updatedAt: Date = Date()
     ) throws -> UsageSnapshot {
         let response: Response
         do {
-            response = try JSONDecoder().decode(Response.self, from: data)
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            response = try decoder.decode(Response.self, from: data)
         } catch {
             throw FetchError.parseFailed("invalid Claude OAuth usage response")
         }
         return UsageSnapshot(
             provider: .claude,
-            fiveHour: rateWindow(response.fiveHour, minutes: 5 * 60),
-            sevenDay: rateWindow(response.sevenDay, minutes: 7 * 24 * 60),
-            credits: creditSnapshot(response.extraUsage),
-            accountEmail: nil,
-            plan: planName(subscriptionType),
-            source: "claude oauth",
+            limits: limits(response.limits ?? []),
+            credits: creditSnapshot(response.extraUsage, spendCurrency: response.spend?.used?.currency),
+            plan: plan,
             updatedAt: updatedAt)
     }
 
-    private static func rateWindow(_ window: Response.Window?, minutes: Int) -> RateWindow? {
-        guard let window, let utilization = window.utilization else { return nil }
-        return RateWindow(
-            usedPercent: max(0, min(100, utilization)),
-            windowMinutes: minutes,
-            resetsAt: parseISO8601(window.resetsAt),
-            resetDescription: nil)
+    /// One entry per reported limit, titled from its group and scope, such as
+    /// "Session", "Weekly", or "Weekly Fable". Presence, not `is_active` or
+    /// nonzero usage, determines visibility; the first entry per title wins.
+    private static func limits(_ entries: [Response.Limit]) -> [UsageLimit] {
+        var seen = Set<String>()
+        return entries.compactMap { entry in
+            guard let percent = entry.percent, percent.isFinite,
+                  let base = (entry.group ?? entry.kind).map(humanizedIdentifier)
+            else { return nil }
+            let scope = entry.scope?.model?.displayName?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? entry.scope?.surface.map(humanizedIdentifier)
+            let title = [base, scope].compactMap { $0 }.filter { !$0.isEmpty }
+                .joined(separator: " ")
+            guard seen.insert(title).inserted else { return nil }
+            return UsageLimit(
+                id: title,
+                title: title,
+                usedPercent: max(0, min(100, percent)),
+                resetsAt: parseISO8601Date(entry.resetsAt),
+                scope: scope?.isEmpty == false ? scope : nil)
+        }
     }
 
-    private static func creditSnapshot(_ extraUsage: Response.ExtraUsage?) -> CreditSnapshot? {
-        guard let extraUsage, extraUsage.isEnabled == true,
-              let monthlyLimit = extraUsage.monthlyLimit
-        else { return nil }
+    /// Remaining extra-usage credit; zero while extra usage is off.
+    private static func creditSnapshot(
+        _ extraUsage: Response.ExtraUsage?,
+        spendCurrency: String?
+    ) -> CreditSnapshot? {
+        guard let extraUsage else { return nil }
+        let currency = extraUsage.currency ?? spendCurrency
+        guard extraUsage.isEnabled == true, let monthlyLimit = extraUsage.monthlyLimit else {
+            return CreditSnapshot(balance: 0, unlimited: false, currencyCode: currency)
+        }
         // Claude OAuth reports monetary values in minor currency units (for
         // example, 10000 USD means $100.00), matching Claude's web API.
         let remaining = max(0, monthlyLimit - (extraUsage.usedCredits ?? 0)) / 100
-        return CreditSnapshot(
-            balance: remaining,
-            hasCredits: true,
-            unlimited: false,
-            currencyCode: extraUsage.currency)
-    }
-
-    private static func parseISO8601(_ value: String?) -> Date? {
-        guard let value else { return nil }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: value) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: value)
+        return CreditSnapshot(balance: remaining, unlimited: false, currencyCode: currency)
     }
 
     private static func retryAfterDate(
@@ -753,49 +574,58 @@ enum ClaudeOAuthUsageFetcher {
         return formatter.date(from: value)
     }
 
-    private static func planName(_ value: String?) -> String? {
-        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty
-        else { return nil }
-        let name = value.replacingOccurrences(of: "_", with: " ").capitalized
-        return name.localizedCaseInsensitiveContains("claude") ? name : "Claude \(name)"
-    }
-
+    // Decoded with `.convertFromSnakeCase`.
     private struct Response: Decodable {
-        struct Window: Decodable {
-            var utilization: Double?
-            var resetsAt: String?
+        struct Limit: Decodable {
+            struct Scope: Decodable {
+                struct Model: Decodable {
+                    var displayName: String?
+                }
+                var model: Model?
+                var surface: String?
 
-            enum CodingKeys: String, CodingKey {
-                case utilization
-                case resetsAt = "resets_at"
+                private enum CodingKeys: CodingKey { case model, surface }
+
+                // Unknown scope shapes must not fail the whole usage response.
+                init(from decoder: Decoder) throws {
+                    let container = try decoder.container(keyedBy: CodingKeys.self)
+                    model = try? container.decode(Model.self, forKey: .model)
+                    surface = try? container.decode(String.self, forKey: .surface)
+                }
             }
+            var kind: String?
+            var group: String?
+            var percent: Double?
+            var resetsAt: String?
+            var scope: Scope?
         }
 
         struct ExtraUsage: Decodable {
             var isEnabled: Bool?
             var monthlyLimit: Double?
             var usedCredits: Double?
-            var utilization: Double?
             var currency: String?
-
-            enum CodingKeys: String, CodingKey {
-                case isEnabled = "is_enabled"
-                case monthlyLimit = "monthly_limit"
-                case usedCredits = "used_credits"
-                case utilization
-                case currency
-            }
         }
 
-        var fiveHour: Window?
-        var sevenDay: Window?
-        var extraUsage: ExtraUsage?
+        struct Spend: Decodable {
+            struct Amount: Decodable {
+                var currency: String?
+            }
+            var used: Amount?
+        }
 
-        enum CodingKeys: String, CodingKey {
-            case fiveHour = "five_hour"
-            case sevenDay = "seven_day"
-            case extraUsage = "extra_usage"
+        var extraUsage: ExtraUsage?
+        var limits: [Limit]?
+        var spend: Spend?
+
+        private enum CodingKeys: CodingKey { case extraUsage, limits, spend }
+
+        // `spend` only supplies a currency; an unexpected shape must not fail usage.
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            extraUsage = try container.decodeIfPresent(ExtraUsage.self, forKey: .extraUsage)
+            limits = try container.decodeIfPresent([Limit].self, forKey: .limits)
+            spend = try? container.decode(Spend.self, forKey: .spend)
         }
     }
 }
@@ -831,6 +661,22 @@ private actor ClaudeOAuthUsageRateLimitGate {
     private var cachedSnapshot: UsageSnapshot?
     private var lastSuccessfulFetchAt: Date?
     private var blockedUntil: Date?
+    private var plan: String?
+    private var planFetchedAt: Date?
+
+    func planNeedsRefresh(lifetime: TimeInterval, now: Date = Date()) -> Bool {
+        guard let planFetchedAt else { return true }
+        return now.timeIntervalSince(planFetchedAt) >= lifetime
+    }
+
+    func cachedPlan() -> String? { plan }
+
+    /// A failed profile lookup clears the label and is retried on the next fetch.
+    func recordPlan(_ plan: String?, lookupSucceeded: Bool, now: Date = Date()) -> String? {
+        self.plan = plan
+        planFetchedAt = lookupSucceeded ? now : nil
+        return plan
+    }
 
     func decision(now: Date = Date()) -> Decision {
         let persistedBlockedUntil = UserDefaults.standard.object(
@@ -870,23 +716,5 @@ private actor ClaudeOAuthUsageRateLimitGate {
 
     func currentBlockedUntil() -> Date? {
         blockedUntil
-    }
-}
-
-struct DynamicCodingKey: CodingKey {
-    var stringValue: String
-    var intValue: Int?
-
-    init(_ stringValue: String) {
-        self.stringValue = stringValue
-    }
-
-    init?(stringValue: String) {
-        self.stringValue = stringValue
-    }
-
-    init?(intValue: Int) {
-        self.stringValue = "\(intValue)"
-        self.intValue = intValue
     }
 }

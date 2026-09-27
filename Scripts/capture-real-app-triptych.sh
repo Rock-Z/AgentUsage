@@ -8,7 +8,7 @@ TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentusage-real-triptych.XXXXXX")"
 BACKGROUND_BINARY="$TEMP_DIR/agentusage-demo-background"
 SNIPASTE="/Applications/Snipaste.app/Contents/MacOS/Snipaste"
 MAGICK="${MAGICK:-/opt/homebrew/bin/magick}"
-APP_PATH="${AGENTUSAGE_APP_PATH:-$HOME/Applications/AgentUsage.app}"
+APP_PATH="${AGENTUSAGE_APP_PATH:-/Applications/AgentUsage.app}"
 PRIMARY_CROP="${AGENTUSAGE_PRIMARY_CROP:-3600x2338+1008+2592}"
 BACKGROUND_PID=""
 
@@ -34,7 +34,7 @@ if [[ ! -d "$APP_PATH" ]]; then
     exit 1
 fi
 
-export SDKROOT="${SDKROOT:-/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk}"
+export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path)}"
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-/tmp/codex-bar-clang-cache}"
 
 swiftc "$ROOT_DIR/Scripts/real-demo-background.swift" -o "$BACKGROUND_BINARY"
@@ -43,25 +43,35 @@ open -g "$APP_PATH"
 sleep 1
 
 select_chart() {
-    local index="$1"
+    local period="$1"
     "$BACKGROUND_BINARY" close-popover
     "$BACKGROUND_BINARY" click-primary-status
     sleep 0.4
     "$BACKGROUND_BINARY" assert-primary-popover
+    # The period selector is a row of buttons named Day, Week, and Cumulative.
     osascript \
-        -e "tell application \"System Events\" to tell process \"AgentUsage\" to click radio button $index of radio group 1 of group 1 of window 1"
-    sleep 0.2
+        -e "tell application \"System Events\" to tell process \"AgentUsage\"" \
+        -e "repeat with element in (entire contents of window 1)" \
+        -e "try" \
+        -e "if role of element is \"AXButton\" and (name of element is \"$period\" or description of element is \"$period\") then" \
+        -e "click element" \
+        -e "exit repeat" \
+        -e "end if" \
+        -e "end try" \
+        -e "end repeat" \
+        -e "end tell"
+    sleep 0.4
     "$BACKGROUND_BINARY" close-popover
 }
 
 capture_state() {
-    local index="$1"
+    local period="$1"
     local style="$2"
     local name="$3"
     local capture_path="$TEMP_DIR/$name.png"
     local full_capture_path="$TEMP_DIR/$name-full.png"
 
-    select_chart "$index"
+    select_chart "$period"
     "$BACKGROUND_BINARY" "$style" >"$TEMP_DIR/background-$name.log" 2>&1 &
     BACKGROUND_PID="$!"
     sleep 0.5
@@ -113,9 +123,9 @@ capture_state() {
     cp "$capture_path" "$CAPTURE_DIR/$name.png"
 }
 
-capture_state 1 light day
-capture_state 2 mixed week
-capture_state 3 dark cumulative
+capture_state Day light day
+capture_state Week mixed week
+capture_state Cumulative dark cumulative
 
 swift "$ROOT_DIR/Scripts/compose-real-app-triptych.swift" \
     "$CAPTURE_DIR/day.png" \

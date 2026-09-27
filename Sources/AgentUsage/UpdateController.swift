@@ -14,23 +14,17 @@ final class UpdateController: NSObject, ObservableObject, SPUUpdaterDelegate {
     private var installUpdate: (() -> Void)?
 
     var actionTitle: String {
-        Self.actionTitle(readyVersion: readyVersion)
+        readyVersion.map { "Update v\($0) Ready - Install" } ?? "Check for Updates"
     }
 
     var canPerformAction: Bool {
         installUpdate != nil || canCheckForUpdates
     }
 
-    nonisolated static func actionTitle(readyVersion: String?) -> String {
-        guard let readyVersion else { return "Check for Updates" }
-        return "Update v\(readyVersion) Ready - Install"
-    }
-
     override init() {
         super.init()
 
-        let isCommandMode = CommandLine.arguments.contains("--self-test")
-            || CommandLine.arguments.contains("--probe-once")
+        let isCommandMode = CommandLine.arguments.contains("--probe-once")
         controller = SPUStandardUpdaterController(
             startingUpdater: !isCommandMode,
             updaterDelegate: self,

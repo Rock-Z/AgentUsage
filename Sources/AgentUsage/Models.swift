@@ -1,6 +1,6 @@
 import Foundation
 
-enum Provider: String, CaseIterable, Identifiable, Codable, Sendable {
+enum Provider: String, CaseIterable, Identifiable, Sendable {
     case codex
     case claude
 
@@ -12,6 +12,13 @@ enum Provider: String, CaseIterable, Identifiable, Codable, Sendable {
         case .claude: "Claude Code"
         }
     }
+
+    var shortName: String {
+        switch self {
+        case .codex: "Codex"
+        case .claude: "Claude"
+        }
+    }
 }
 
 enum MenuProviderSelection: String, CaseIterable, Identifiable {
@@ -21,11 +28,12 @@ enum MenuProviderSelection: String, CaseIterable, Identifiable {
 
     var id: String { self.rawValue }
 
-    var label: String {
-        switch self {
-        case .codex: "Codex"
-        case .claude: "Claude"
-        case .combined: "Both"
+    /// Both or neither maps to `.combined`.
+    init(codex: Bool, claude: Bool) {
+        self = switch (codex, claude) {
+        case (true, false): .codex
+        case (false, true): .claude
+        default: .combined
         }
     }
 
@@ -35,6 +43,18 @@ enum MenuProviderSelection: String, CaseIterable, Identifiable {
         case .claude: .claude
         case .combined: nil
         }
+    }
+
+    var providers: [Provider] {
+        provider.map { [$0] } ?? Provider.allCases
+    }
+
+    /// This selection with `provider` added or removed; `nil` when none would remain.
+    func setting(_ provider: Provider, _ included: Bool) -> MenuProviderSelection? {
+        var providers = Set(providers)
+        if included { providers.insert(provider) } else { providers.remove(provider) }
+        guard !providers.isEmpty else { return nil }
+        return MenuProviderSelection(codex: providers.contains(.codex), claude: providers.contains(.claude))
     }
 
     func isAvailable(with trackedProviders: [Provider]) -> Bool {
@@ -52,42 +72,53 @@ enum MenuProviderSelection: String, CaseIterable, Identifiable {
         guard !isAvailable(with: trackedProviders),
               let provider = trackedProviders.first
         else { return self }
-        return provider == .codex ? .codex : .claude
+        return MenuProviderSelection(codex: provider == .codex, claude: provider == .claude)
     }
 }
 
+/// What the menu bar shows for each provider; any combination can be chosen.
 enum MenuMetric: String, CaseIterable, Identifiable {
-    case fiveHourPercent
-    case sevenDayPercent
-    case bothPercent
-    case billingDollars
+    /// The account-wide limits: short and long windows as nested rings.
+    case limits
+    case credits
+
+    /// Reads a comma-separated set, including single values stored by earlier versions.
+    static func set(stored: String) -> Set<MenuMetric> {
+        let metrics = stored.split(separator: ",").compactMap { value -> MenuMetric? in
+            switch value {
+            case "fiveHourPercent", "sevenDayPercent", "bothPercent", "tightest", "topTwo", "limits": .limits
+            case "billingDollars", "credits": .credits
+            default: nil
+            }
+        }
+        return metrics.isEmpty ? [.limits] : Set(metrics)
+    }
+
+    static func stored(_ metrics: Set<MenuMetric>) -> String {
+        allCases.filter(metrics.contains).map(\.rawValue).joined(separator: ",")
+    }
 
     var id: String { self.rawValue }
-
-    var label: String {
-        switch self {
-        case .fiveHourPercent: "5h%"
-        case .sevenDayPercent: "7d%"
-        case .bothPercent: "All limits"
-        case .billingDollars: "Billing $"
-        }
-    }
 }
 
-enum MenuDisplayMode: String, CaseIterable, Identifiable {
+/// How limits are drawn in the menu bar: a ring, percentages, or both.
+enum MenuDisplayMode: String, CaseIterable {
     case ring
     case percentage
     case ringAndPercentage
 
-    var id: String { self.rawValue }
-
-    var label: String {
-        switch self {
-        case .ring: "Ring"
-        case .percentage: "Percentage"
-        case .ringAndPercentage: "Ring + Percentage"
+    /// `nil` when neither is shown.
+    init?(ring: Bool, percentage: Bool) {
+        switch (ring, percentage) {
+        case (true, true): self = .ringAndPercentage
+        case (true, false): self = .ring
+        case (false, true): self = .percentage
+        case (false, false): return nil
         }
     }
+
+    var showsRing: Bool { self != .percentage }
+    var showsPercentage: Bool { self != .ring }
 }
 
 struct FirstLaunchSettings {
@@ -109,17 +140,11 @@ struct FirstLaunchSettings {
         defaults.set(providers.contains(.codex), forKey: "trackCodex")
         defaults.set(providers.contains(.claude), forKey: "trackClaude")
 
-        let selection: MenuProviderSelection = switch (
-            providers.contains(.codex),
-            providers.contains(.claude)
-        ) {
-        case (true, true): .combined
-        case (true, false): .codex
-        case (false, true): .claude
-        case (false, false): .combined
-        }
+        let selection = MenuProviderSelection(
+            codex: providers.contains(.codex),
+            claude: providers.contains(.claude))
         defaults.set(selection.rawValue, forKey: "menuProvider")
-        defaults.set(MenuMetric.bothPercent.rawValue, forKey: "menuMetric")
+        defaults.set(MenuMetric.limits.rawValue, forKey: "menuMetric")
         defaults.set(
             MenuDisplayMode.ringAndPercentage.rawValue,
             forKey: "menuDisplayMode")
@@ -180,19 +205,18 @@ struct ChartPositionPersistence {
     }
 }
 
-struct RateWindow: Codable, Equatable, Sendable {
+/// One usage limit as the provider reports it. Titles come from the
+/// provider's own names, so new or returning limits appear without code changes.
+struct UsageLimit: Equatable, Sendable, Identifiable {
+    var id: String
+    var title: String
     var usedPercent: Double
-    var windowMinutes: Int?
     var resetsAt: Date?
-    var resetDescription: String?
+    /// The model or surface this limit applies to; `nil` for account-wide limits.
+    var scope: String? = nil
 
     var remainingPercent: Double {
         max(0, 100 - self.usedPercent)
-    }
-
-    var durationLabel: String {
-        guard let windowMinutes, windowMinutes > 0 else { return "Limit" }
-        return Self.durationLabel(minutes: windowMinutes)
     }
 
     static func durationLabel(minutes: Int) -> String {
@@ -207,14 +231,13 @@ struct RateWindow: Codable, Equatable, Sendable {
     }
 }
 
-struct CreditSnapshot: Codable, Equatable, Sendable {
+struct CreditSnapshot: Equatable, Sendable {
     var balance: Double?
-    var hasCredits: Bool
     var unlimited: Bool
     var currencyCode: String? = nil
 }
 
-struct ResetCredit: Codable, Equatable, Sendable {
+struct ResetCredit: Decodable, Equatable, Sendable {
     var resetType: String?
     var status: String
     var grantedAt: Date?
@@ -223,12 +246,12 @@ struct ResetCredit: Codable, Equatable, Sendable {
     var description: String?
 }
 
-struct ResetCreditSnapshot: Codable, Equatable, Sendable {
+struct ResetCreditSnapshot: Equatable, Sendable {
     var availableCount: Int
     var credits: [ResetCredit]
 }
 
-struct TokenUsageDay: Codable, Equatable, Sendable, Identifiable {
+struct TokenUsageDay: Equatable, Sendable, Identifiable {
     var startDate: String
     var tokens: Int64
 
@@ -313,7 +336,7 @@ struct TokenWeekBucket: Identifiable {
     }
 }
 
-struct CodexActivitySnapshot: Codable, Equatable, Sendable {
+struct CodexActivitySnapshot: Equatable, Sendable {
     var lifetimeTokens: Int64?
     var peakDailyTokens: Int64?
     var longestRunningTurnSec: Int64?
@@ -322,20 +345,18 @@ struct CodexActivitySnapshot: Codable, Equatable, Sendable {
     var dailyUsage: [TokenUsageDay]
 }
 
-struct UsageSnapshot: Codable, Equatable, Sendable {
+struct UsageSnapshot: Equatable, Sendable {
     var provider: Provider
-    var fiveHour: RateWindow?
-    var sevenDay: RateWindow?
+    var limits: [UsageLimit] = []
     var credits: CreditSnapshot? = nil
     var resetCredits: ResetCreditSnapshot? = nil
-    var accountEmail: String?
     var plan: String?
     var codexActivity: CodexActivitySnapshot? = nil
-    var source: String
     var updatedAt: Date
 
-    var rateWindows: [RateWindow] {
-        [fiveHour, sevenDay].compactMap { $0 }
+    /// Account-wide limits, shortest window first as the provider reports them.
+    var accountLimits: [UsageLimit] {
+        limits.filter { $0.scope == nil }
     }
 }
 
@@ -343,6 +364,54 @@ struct ProviderState: Equatable {
     var snapshot: UsageSnapshot?
     var isRefreshing = false
     var error: String?
+}
+
+/// What the menu bar shows for one provider under the selected metrics.
+struct MenuBarStatusEntry: Sendable {
+    var provider: Provider
+    /// Up to two account-wide limits, shortest window first (e.g. 5h and 7d).
+    var limits: [UsageLimit]
+    var percentText: String?
+    var amountText: String?
+
+    init(provider: Provider, snapshot: UsageSnapshot?, metrics: Set<MenuMetric>) {
+        self.provider = provider
+        limits = metrics.contains(.limits)
+            ? Array((snapshot?.accountLimits ?? []).prefix(2))
+            : []
+        percentText = limits.isEmpty
+            ? nil
+            : limits.map { "\($0.title) \(DisplayFormatter.percent($0.remainingPercent))" }
+                .joined(separator: "\n")
+        // Without limits to show, credits are the only useful fallback.
+        amountText = metrics.contains(.credits) || limits.isEmpty
+            ? DisplayFormatter.amountText(snapshot)
+            : nil
+    }
+
+    var summary: String {
+        let parts = limits.map { "\($0.title) \(DisplayFormatter.percent($0.remainingPercent)) left" }
+            + [amountText].compactMap { $0 }
+        return parts.isEmpty ? "No usage data" : parts.joined(separator: ", ")
+    }
+}
+
+/// Turns an API identifier such as `weekly_all` into "Weekly all".
+func humanizedIdentifier(_ identifier: String) -> String {
+    let words = identifier.replacingOccurrences(of: "_", with: " ")
+        .replacingOccurrences(of: "-", with: " ")
+        .trimmingCharacters(in: .whitespaces)
+    return words.prefix(1).uppercased() + words.dropFirst()
+}
+
+/// Parses ISO 8601 timestamps with or without fractional seconds.
+func parseISO8601Date(_ value: String?) -> Date? {
+    guard let value else { return nil }
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = formatter.date(from: value) { return date }
+    formatter.formatOptions = [.withInternetDateTime]
+    return formatter.date(from: value)
 }
 
 enum DisplayFormatter {
@@ -454,7 +523,8 @@ enum DisplayFormatter {
 
     static func credits(_ snapshot: CreditSnapshot) -> String {
         if snapshot.unlimited { return "Unlimited" }
-        guard snapshot.hasCredits, let balance = snapshot.balance else { return "--" }
+        // A zero balance is still a balance; only an unknown one shows "--".
+        guard let balance = snapshot.balance else { return "--" }
 
         if snapshot.currencyCode?.uppercased() == "USD" {
             return dollars(balance)
@@ -511,49 +581,5 @@ enum DisplayFormatter {
 
     static func amountText(_ snapshot: UsageSnapshot?) -> String? {
         snapshot?.credits.map(self.credits)
-    }
-
-    static func fallbackAmountText(
-        states: [Provider: ProviderState],
-        providerSelection: MenuProviderSelection) -> String?
-    {
-        guard let provider = providerSelection.provider else { return nil }
-        return self.amountText(states[provider]?.snapshot)
-    }
-
-    static func selectedWindow(
-        states: [Provider: ProviderState],
-        providerSelection: MenuProviderSelection,
-        metric: MenuMetric) -> RateWindow?
-    {
-        guard metric == .fiveHourPercent || metric == .sevenDayPercent else { return nil }
-        if let provider = providerSelection.provider {
-            return metric == .fiveHourPercent
-                ? states[provider]?.snapshot?.fiveHour
-                : states[provider]?.snapshot?.sevenDay
-        }
-        let windows = Provider.allCases.compactMap { provider in
-            metric == .fiveHourPercent
-                ? states[provider]?.snapshot?.fiveHour
-                : states[provider]?.snapshot?.sevenDay
-        }
-        return windows.max { $0.usedPercent < $1.usedPercent }
-    }
-
-    static func menuPercentText(
-        window: RateWindow?,
-        innerWindow: RateWindow?,
-        metric: MenuMetric) -> String?
-    {
-        guard metric != .billingDollars else { return nil }
-        if metric == .bothPercent {
-            let lines = [window, innerWindow].compactMap { rateWindow -> String? in
-                guard let rateWindow else { return nil }
-                return "\(rateWindow.durationLabel): \(Self.percent(rateWindow.remainingPercent))"
-            }
-            return lines.isEmpty ? nil : lines.joined(separator: "\n")
-        }
-        guard let window else { return nil }
-        return Self.percent(window.remainingPercent)
     }
 }

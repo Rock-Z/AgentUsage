@@ -27,15 +27,15 @@ enum ProbeCommand {
     }
 
     private static func summary(_ snapshot: UsageSnapshot) -> String {
-        let limits = snapshot.rateWindows
-            .map { "\($0.durationLabel) \(DisplayFormatter.percent($0.usedPercent))" }
+        let limits = snapshot.limits
+            .map { "\($0.title) \(DisplayFormatter.percent($0.usedPercent))" }
             .joined(separator: ", ")
         let amount = DisplayFormatter.amountText(snapshot) ?? DisplayFormatter.dollars(0)
         let amountLabel = snapshot.credits != nil ? "credits" : "local usage"
         let activity = snapshot.codexActivity.map {
             ", activity \(DisplayFormatter.compactTokens($0.lifetimeTokens)) lifetime"
         } ?? ""
-        let account = snapshot.accountEmail ?? snapshot.plan ?? "unknown account"
-        return "\(snapshot.provider.displayName): limits \(limits.isEmpty ? "--" : limits), \(amountLabel) \(amount)\(activity), \(account), source \(snapshot.source)"
+        let plan = snapshot.plan ?? "unknown plan"
+        return "\(snapshot.provider.displayName): limits \(limits.isEmpty ? "--" : limits), \(amountLabel) \(amount)\(activity), \(plan)"
     }
 }
