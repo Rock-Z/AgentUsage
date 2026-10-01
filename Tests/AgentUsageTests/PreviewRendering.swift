@@ -89,11 +89,12 @@ private func renderStatusItem(appearance: NSAppearance.Name) -> NSBitmapImageRep
     rep.size = canvas
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-    NSAppearance(named: appearance)!.performAsCurrentDrawingAppearance {
-        icon.draw(
-            at: NSPoint(x: 8, y: (canvas.height - icon.size.height) / 2),
-            from: .zero, operation: .sourceOver, fraction: 1)
-    }
+    icon.draw(
+        at: NSPoint(x: 8, y: (canvas.height - icon.size.height) / 2),
+        from: .zero, operation: .sourceOver, fraction: 1)
+    // The icon is a template; tint it as macOS would for this menu bar.
+    (appearance == .darkAqua ? NSColor.white : NSColor.black).setFill()
+    NSRect(origin: .zero, size: canvas).fill(using: .sourceAtop)
     NSGraphicsContext.restoreGraphicsState()
     return rep
 }

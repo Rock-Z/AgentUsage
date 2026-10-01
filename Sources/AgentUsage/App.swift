@@ -756,7 +756,7 @@ struct MenuBarLabelView: View {
         Image(nsImage: MenuBarStatusImageRenderer.image(
             entries: entries,
             displayMode: store.menuDisplayMode))
-            .renderingMode(.original)
+            .renderingMode(.template)
             .help(helpText)
     }
 
@@ -788,13 +788,23 @@ enum MenuBarStatusImageRenderer {
     private static let singleLineTextVerticalOffset: CGFloat = -0.75
 
     /// Several entries are drawn side by side, one per provider.
+    ///
+    /// The result is a template image: drawn in black with alpha, then tinted
+    /// by macOS like other menu bar icons for the actual menu bar, which
+    /// varies with wallpaper, display, and focus. Fixed colors cannot follow it.
     static func image(
         entries: [MenuBarStatusEntry],
         displayMode: MenuDisplayMode) -> NSImage
     {
         let images = entries.map { image(entry: $0, displayMode: displayMode) }
-        return images.count == 1 ? images[0] : sideBySideImage(images)
+        let image = images.count == 1 ? images[0] : sideBySideImage(images)
+        image.isTemplate = true
+        return image
     }
+
+    /// Template ink: full strength, and a dimmer tone for labels.
+    private static let primaryInk = NSColor.black
+    private static let secondaryInk = NSColor.black.withAlphaComponent(0.5)
 
     /// Draws, left to right: the limit ring, the limit percentages, and credits.
     private static func image(
@@ -863,7 +873,7 @@ enum MenuBarStatusImageRenderer {
         let clamped = max(0, min(100, remainingPercent))
         guard clamped > 0 else { return }
 
-        NSColor.labelColor.setFill()
+        primaryInk.setFill()
         let path = NSBezierPath()
         let center = CGPoint(x: rect.midX, y: rect.midY)
         path.move(to: center)
@@ -910,7 +920,7 @@ enum MenuBarStatusImageRenderer {
         let clamped = max(0, min(100, remainingPercent))
         guard clamped > 0 else { return }
 
-        NSColor.labelColor.setStroke()
+        primaryInk.setStroke()
         let path = NSBezierPath()
         path.lineWidth = lineWidth
         path.lineCapStyle = .butt
@@ -959,7 +969,7 @@ enum MenuBarStatusImageRenderer {
         if let space = line.range(of: " ", options: .backwards) {
             styled.addAttribute(
                 .foregroundColor,
-                value: NSColor.secondaryLabelColor,
+                value: secondaryInk,
                 range: NSRange(line.startIndex..<space.lowerBound, in: line))
         }
         return styled
@@ -990,7 +1000,7 @@ enum MenuBarStatusImageRenderer {
         }
         return [
             .font: self.textAttributesFont(multiline: multiline),
-            .foregroundColor: NSColor.labelColor,
+            .foregroundColor: primaryInk,
             .paragraphStyle: paragraph,
         ]
     }
