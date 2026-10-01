@@ -317,6 +317,11 @@ struct MenuContentView: View {
     @StateObject private var launchAtLoginController = LaunchAtLoginController()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("optionsExpanded") private var optionsExpanded = false
+    /// How much of the options panel shows while folding: 0 collapsed, 1 expanded.
+    /// `nil` when at rest, following `optionsExpanded`.
+    @State private var optionsReveal: CGFloat?
+    @State private var optionsHeight: CGFloat = 0
+    @State private var optionsRevealTask: Task<Void, Never>?
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
@@ -443,19 +448,44 @@ struct MenuContentView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
 
-            if optionsExpanded {
-                footer
-                    .fixedSize(horizontal: false, vertical: true)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-            }
+            // The panel stays laid out so its natural height is known; the fold
+            // reveals it from the top.
+            let reveal = optionsReveal ?? (optionsExpanded ? 1 : 0)
+            footer
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { optionsHeight = $0 }
+                .frame(height: optionsHeight * reveal, alignment: .top)
+                .clipped()
+                .opacity(Double(reveal))
+                .allowsHitTesting(reveal == 1)
+                .accessibilityHidden(reveal == 0)
         }
-        // Keeps the sliding options from drawing over the header above.
-        .clipped()
     }
 
+    /// Folds the options open or closed. SwiftUI animations do not resize the
+    /// menu bar window as they play, so the revealed height is stepped instead
+    /// and the window follows it frame by frame.
     private func toggleOptions() {
-        withAnimation(reduceMotion ? nil : .smooth(duration: 0.28)) {
-            optionsExpanded.toggle()
+        let expanding = !optionsExpanded
+        let start = optionsReveal ?? (expanding ? 0 : 1)
+        let target: CGFloat = expanding ? 1 : 0
+        optionsRevealTask?.cancel()
+        optionsReveal = reduceMotion ? nil : start
+        withAnimation(reduceMotion ? nil : .smooth(duration: 0.25)) {
+            optionsExpanded = expanding
+        }
+        guard !reduceMotion else { return }
+        optionsRevealTask = Task { @MainActor in
+            let duration = 0.25
+            let began = Date()
+            while !Task.isCancelled {
+                let progress = min(1, Date().timeIntervalSince(began) / duration)
+                let eased = 1 - pow(1 - progress, 3)
+                optionsReveal = start + (target - start) * eased
+                if progress >= 1 { break }
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            if !Task.isCancelled { optionsReveal = nil }
         }
     }
 
