@@ -317,11 +317,13 @@ struct MenuContentView: View {
     @StateObject private var launchAtLoginController = LaunchAtLoginController()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("optionsExpanded") private var optionsExpanded = false
+    @AppStorage("accentColor") private var accentRaw = AccentChoice.system.stored
     /// How much of the options panel shows while folding: 0 collapsed, 1 expanded.
     /// `nil` when at rest, following `optionsExpanded`.
     @State private var optionsReveal: CGFloat?
     @State private var optionsHeight: CGFloat = 0
     @State private var optionsRevealTask: Task<Void, Never>?
+    @State private var optionsHeaderFrame = CGRect.zero
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
@@ -335,7 +337,8 @@ struct MenuContentView: View {
     private var visualTheme: UsageVisualTheme {
         UsageVisualTheme(
             colorScheme: colorScheme,
-            contrast: colorSchemeContrast)
+            contrast: colorSchemeContrast,
+            accent: AccentChoice(stored: accentRaw))
     }
 
     var body: some View {
@@ -447,6 +450,7 @@ struct MenuContentView: View {
             .accessibilityValue(optionsExpanded ? "Expanded" : "Collapsed")
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { optionsHeaderFrame = $0 }
 
             // The panel stays laid out so its natural height is known; the fold
             // reveals it from the top.
@@ -523,6 +527,16 @@ struct MenuContentView: View {
                                 isLocked: mode == .percentage || !metrics.contains(.limits))
                         }
                     }
+                    Divider()
+                    GridRow {
+                        optionLabel("Accent")
+                        AccentOptionRow(
+                            choice: Binding(
+                                get: { AccentChoice(stored: accentRaw) },
+                                set: { accentRaw = $0.stored }),
+                            // Folding the options resizes the window.
+                            closesPickerAtOnce: { optionsHeaderFrame.contains($0) })
+                    }
                 }
                 Divider()
                 optionRow("Refresh") {
@@ -539,6 +553,7 @@ struct MenuContentView: View {
                     }
                     .labelsHidden()
                     .controlSize(.small)
+                    .focusable(false)
                     .accessibilityValue(refreshIntervalLabel)
                     Text(refreshIntervalLabel)
                         .monospacedDigit()
@@ -1443,6 +1458,7 @@ private enum ChartLayout {
 private struct UsageVisualTheme: Equatable {
     var colorScheme: ColorScheme
     var contrast: ColorSchemeContrast
+    var accent: AccentChoice = .system
 
     // System semantic colors resolve against the effective AppKit appearance
     // and retain vibrancy when composited over the window's local material.
@@ -1450,10 +1466,9 @@ private struct UsageVisualTheme: Equatable {
     private var semanticSecondary: Color { Color(nsColor: .secondaryLabelColor) }
     private var semanticTertiary: Color { Color(nsColor: .tertiaryLabelColor) }
 
+    /// The chosen accent for this appearance; the macOS accent by default.
     var accentColor: Color {
-        colorScheme == .dark
-            ? Color(red: 0.31, green: 0.61, blue: 0.84)
-            : Color(red: 0.16, green: 0.47, blue: 0.74)
+        accent.color(dark: colorScheme == .dark)
     }
 
     private var contrastBoost: Double {
