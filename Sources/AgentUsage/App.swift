@@ -2094,8 +2094,11 @@ private struct TokenWeeklyBars: View {
                     weekCount: 1)
                 let columnWidth = cell.cellSize + cell.columnSpacing
                 let barsWidth = columnWidth * CGFloat(max(1, buckets.count))
+                // Show a whole number of bars, so every snap position, including
+                // the far right end of the scroll range, lands on a bar boundary.
+                let visibleWidth = max(columnWidth, (geometry.size.width / columnWidth).rounded(.down) * columnWidth)
                 // Too few weeks to fill the chart: keep bars at the recent (trailing) edge.
-                let contentWidth = max(barsWidth, geometry.size.width)
+                let contentWidth = max(barsWidth, visibleWidth)
                 let leadingInset = contentWidth - barsWidth
 
                 ZStack(alignment: .bottom) {
@@ -2190,6 +2193,7 @@ private struct TokenWeeklyBars: View {
                     ChartDateLegend(dates: legendDates, isHidden: chrome.legendHidden)
                         .padding(.horizontal, 2)
                 }
+                .frame(width: visibleWidth)
             }
         }
         .accessibilityElement(children: .ignore)
