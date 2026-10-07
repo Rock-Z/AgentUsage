@@ -124,7 +124,7 @@ private enum PreviewData {
                 ResetCredit(resetType: nil, status: "available", grantedAt: nil, expiresAt: now + 9 * 86_400, title: nil, description: nil),
                 ResetCredit(resetType: nil, status: "available", grantedAt: nil, expiresAt: now + 26 * 86_400, title: nil, description: nil),
             ]),
-        plan: PlanNames.codex("pro"),
+        plan: "pro",
         codexActivity: activity,
         updatedAt: now)
 
@@ -136,7 +136,7 @@ private enum PreviewData {
             UsageLimit(id: "Weekly Fable", title: "Weekly Fable", usedPercent: 18, resetsAt: now + 2.1 * 86_400, scope: "Fable"),
         ],
         credits: CreditSnapshot(balance: 25, unlimited: false, currencyCode: "USD"),
-        plan: PlanNames.claude("max", rateLimitTier: "default_claude_max_20x"),
+        plan: "max",
         updatedAt: now)
 
     /// About 200 days of activity with weekday rhythm and a few quiet stretches.

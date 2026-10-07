@@ -61,27 +61,11 @@ struct ClaudeUsageParsingTests {
 
         #expect(response.statusCode == 200)
         #expect(response.retryAfter == "120")
-        #expect(PlanNames.claude(response.subscriptionType, rateLimitTier: response.rateLimitTier) == "Max 20x")
+        #expect(response.subscriptionType == "max")
         #expect(response.body == body, "body bytes pass through unchanged")
 
         #expect(throws: FetchError.self) {
             try ClaudeCredentialHelper.parse(Data("200\n\n{}".utf8))
-        }
-    }
-}
-
-struct PlanNameTests {
-    @Test func claudeMaxTierComesFromRateLimitTier() {
-        #expect(PlanNames.claude("max", rateLimitTier: "default_claude_max_5x") == "Max 5x")
-        #expect(PlanNames.claude("max", rateLimitTier: "future_tier") == "Max")
-        #expect(PlanNames.claude("pro", rateLimitTier: "default_claude_max_20x") == "Pro", "tier only qualifies Max")
-    }
-
-    @Test func unknownPlansAreOmitted() {
-        #expect(PlanNames.codex(" ProLite ") == "Pro 5x", "normalizes case and whitespace")
-        for raw in [nil, "", "future_plan"] as [String?] {
-            #expect(PlanNames.codex(raw) == nil)
-            #expect(PlanNames.claude(raw, rateLimitTier: nil) == nil)
         }
     }
 }

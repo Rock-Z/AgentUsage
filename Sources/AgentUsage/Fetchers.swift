@@ -114,7 +114,8 @@ struct CodexUsageFetcher: UsageFetching {
                 ResetCreditSnapshot(availableCount: $0.availableCount, credits: $0.credits ?? [])
             },
             // Usage is a live server response; account/read can reflect old sign-in metadata.
-            plan: PlanNames.codex(response.rateLimits.planType),
+            // Plans show as the backend names them, so renamed or new plans need no update.
+            plan: response.rateLimits.planType,
             codexActivity: activity,
             updatedAt: Date())
     }
@@ -485,7 +486,7 @@ struct ClaudeUsageFetcher: UsageFetching {
         }
         let plan = if includePlan {
             await gate.recordPlan(
-                PlanNames.claude(response.subscriptionType, rateLimitTier: response.rateLimitTier),
+                response.subscriptionType,
                 lookupSucceeded: response.subscriptionType != nil)
         } else {
             await gate.cachedPlan()
