@@ -289,7 +289,7 @@ private struct PickerPopover<Content: View>: NSViewRepresentable {
         coordinator.popover?.close()
     }
 
-    final class Coordinator: NSObject, NSPopoverDelegate {
+    @MainActor final class Coordinator: NSObject, NSPopoverDelegate {
         var popover: NSPopover?
         var close: () -> Void = {}
         var closesAtOnce: (CGPoint) -> Bool = { _ in false }

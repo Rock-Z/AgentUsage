@@ -842,9 +842,9 @@ enum MenuBarStatusImageRenderer {
         displayMode: MenuDisplayMode) -> NSImage
     {
         let images = entries.map { image(entry: $0, displayMode: displayMode) }
-        let image = images.count == 1 ? images[0] : sideBySideImage(images)
-        image.isTemplate = true
-        return image
+        let combined = images.count == 1 ? images[0] : sideBySideImage(images)
+        combined.isTemplate = true
+        return combined
     }
 
     /// Template ink: full strength, and a dimmer tone for labels.
