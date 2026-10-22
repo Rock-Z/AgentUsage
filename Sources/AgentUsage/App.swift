@@ -1161,11 +1161,15 @@ struct ProviderCard: View {
                 .zIndex(1)
 
             VStack(alignment: .leading, spacing: LayoutSpacing.related) {
-                ForEach(state.snapshot?.limits ?? []) { limit in
-                    UsageBar(label: limit.title, limit: limit)
-                }
-                if state.snapshot?.limits.isEmpty != false {
-                    UsageBar(label: "Limits", limit: nil)
+                // Wider than a label's gap to its own bar, so each bar reads
+                // with its label rather than the next one.
+                VStack(alignment: .leading, spacing: LayoutSpacing.section) {
+                    ForEach(state.snapshot?.limits ?? []) { limit in
+                        UsageBar(label: limit.title, limit: limit)
+                    }
+                    if state.snapshot?.limits.isEmpty != false {
+                        UsageBar(label: "Limits", limit: nil)
+                    }
                 }
                 if provider == .codex,
                    let activity = state.snapshot?.codexActivity
