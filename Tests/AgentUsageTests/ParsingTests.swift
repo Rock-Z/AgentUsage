@@ -26,6 +26,9 @@ struct ClaudeUsageParsingTests {
         #expect(snapshot.limits.map(\.remainingPercent) == [74, 57, 100, 0, 95], "percentages are clamped")
         #expect(snapshot.limits.map(\.scope) == [nil, nil, "Fable", "Cowork", nil])
         #expect(snapshot.limits[0].resetsAt != nil, "fractional-second timestamps parse")
+        let session: TimeInterval = 5 * 3_600, week: TimeInterval = 7 * 86_400
+        #expect(snapshot.limits.map(\.windowDuration) == [session, week, week, week, nil],
+                "known groups have known windows; unknown ones get no pace")
         #expect(!snapshot.limits.contains { $0.usedPercent == 99 }, "legacy top-level windows are not read")
         // Minor currency units: 10000 - 3750 cents leaves $62.50.
         #expect(DisplayFormatter.amountText(snapshot) == "$62.50")
@@ -96,6 +99,8 @@ struct CodexParsingTests {
                 "main limit first, shortest window first, other limits titled by their own names")
         #expect(response.limits.map(\.usedPercent) == [40, 10, 0, 5])
         #expect(response.limits.map(\.scope) == [nil, nil, "gpt-reserve", "Future limit"])
+        let fiveHours: TimeInterval = 18_000, sevenDays: TimeInterval = 604_800
+        #expect(response.limits.map(\.windowDuration) == [fiveHours, sevenDays, sevenDays, nil])
         #expect(response.rateLimitResetCredits?.credits?.first?.expiresAt == Date(timeIntervalSince1970: 1791174033))
     }
 
@@ -127,5 +132,22 @@ struct CodexParsingTests {
         #expect(activity.dailyUsage.count == 2)
         #expect(activity.dailyUsage.last?.date != nil)
         #expect(DisplayFormatter.duration(seconds: activity.longestRunningTurnSec) == "13h 17m")
+    }
+}
+
+struct PaceTests {
+    private let resets = Date(timeIntervalSince1970: 1_000_000)
+
+    @Test func paceIsTheShareOfTheWindowStillLeft() {
+        let limit = UsageLimit(id: "w", title: "7d", usedPercent: 40, resetsAt: resets, windowDuration: 100)
+        #expect(limit.windowRemainingFraction(at: resets - 25) == 0.25)
+        #expect(limit.windowRemainingFraction(at: resets - 500) == 1, "clamped before the window starts")
+        #expect(limit.windowRemainingFraction(at: resets + 5) == 0, "clamped once it resets")
+    }
+
+    @Test func paceNeedsAWindowAndAReset() {
+        #expect(UsageLimit(id: "a", title: "a", usedPercent: 0, resetsAt: resets).windowRemainingFraction(at: resets) == nil)
+        #expect(UsageLimit(id: "b", title: "b", usedPercent: 0, resetsAt: nil, windowDuration: 60)
+            .windowRemainingFraction(at: resets) == nil)
     }
 }

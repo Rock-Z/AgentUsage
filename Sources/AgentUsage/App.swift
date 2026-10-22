@@ -1486,6 +1486,12 @@ private struct UsageVisualTheme: Equatable {
     var dataMark: Color { accentColor.opacity(min(1, 0.88 + contrastBoost)) }
     var usageFill: Color { accentColor.opacity(min(1, 0.82 + contrastBoost)) }
     var usageTrack: Color { semanticPrimary.opacity(0.10 + contrastBoost / 2) }
+    /// The pace marker in contrast with what it crosses: the accent fill or the track.
+    func paceMarker(onFill: Bool) -> Color {
+        guard onFill else { return contrast == .increased ? semanticPrimary : semanticSecondary }
+        return Color(nsColor: accent.inkColor(dark: colorScheme == .dark))
+            .opacity(contrast == .increased ? 1 : 0.9)
+    }
     var controlTrack: Color { semanticPrimary.opacity(0.12 + contrastBoost / 2) }
     var controlTick: Color { semanticSecondary.opacity(0.55 + contrastBoost) }
     var chartRule: Color { Color(nsColor: .separatorColor) }
@@ -2586,6 +2592,22 @@ struct ResetExpirationPopup: View {
     }
 }
 
+/// Where usage would be if spread evenly over the window, drawn across a
+/// usage bar: remaining usage reaching past it is under pace.
+private struct PaceMarker: View {
+    static let width: CGFloat = 2
+    /// Whether the marker crosses the filled part of the bar.
+    var onFill: Bool
+    @Environment(\.usageVisualTheme) private var theme
+
+    var body: some View {
+        Capsule()
+            .fill(theme.paceMarker(onFill: onFill))
+            .frame(width: Self.width, height: 10)
+            .help("Pace: where usage would be if spread evenly over this window")
+    }
+}
+
 struct UsageBar: View {
     var label: String
     var limit: UsageLimit?
@@ -2610,20 +2632,32 @@ struct UsageBar: View {
                 }
             }
             .font(.caption)
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(theme.usageTrack)
-                    Capsule()
-                        .fill(theme.usageFill)
-                        .frame(width: geometry.size.width * progress)
+            TimelineView(.everyMinute) { context in
+                let pace = limit?.windowRemainingFraction(at: context.date)
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(theme.usageTrack)
+                        Capsule()
+                            .fill(theme.usageFill)
+                            .frame(width: geometry.size.width * progress)
+                        if let pace {
+                            PaceMarker(onFill: pace < progress)
+                                .offset(x: geometry.size.width * pace - PaceMarker.width / 2)
+                        }
+                    }
                 }
+                .frame(height: 6)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(label) remaining")
+                .accessibilityValue(accessibilityValue(pace: pace))
             }
-            .frame(height: 6)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(label) remaining")
-            .accessibilityValue(percentText)
         }
+    }
+
+    private func accessibilityValue(pace: Double?) -> String {
+        guard let pace else { return percentText }
+        return "\(percentText), \(DisplayFormatter.percent(pace * 100)) of the window left"
     }
 
     private var percentText: String {

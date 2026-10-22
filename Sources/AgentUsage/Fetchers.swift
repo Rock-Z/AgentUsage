@@ -156,7 +156,8 @@ struct CodexRateLimitsResponse: Decodable {
                             .compactMap { $0 }.joined(separator: " "),
                         usedPercent: max(0, min(100, window.usedPercent)),
                         resetsAt: window.resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) },
-                        scope: name)
+                        scope: name,
+                        windowDuration: window.windowDurationMins.map { TimeInterval($0) * 60 })
                 }
         }
     }
@@ -537,9 +538,17 @@ struct ClaudeUsageFetcher: UsageFetching {
                 title: title,
                 usedPercent: max(0, min(100, percent)),
                 resetsAt: parseISO8601Date(entry.resetsAt),
-                scope: scope?.isEmpty == false ? scope : nil)
+                scope: scope?.isEmpty == false ? scope : nil,
+                windowDuration: entry.group.flatMap { windowDurations[$0] })
         }
     }
+
+    /// Claude reports no window lengths; these are its documented session and
+    /// weekly windows. Other groups show no pace rather than a guessed one.
+    private static let windowDurations: [String: TimeInterval] = [
+        "session": 5 * 3_600,
+        "weekly": 7 * 86_400,
+    ]
 
     /// Remaining extra-usage credit; zero while extra usage is off.
     private static func creditSnapshot(

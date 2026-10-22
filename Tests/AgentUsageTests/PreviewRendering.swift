@@ -114,8 +114,8 @@ private enum PreviewData {
     static let codex = UsageSnapshot(
         provider: .codex,
         limits: [
-            UsageLimit(id: "codex.secondary", title: "5h", usedPercent: 24, resetsAt: now + 2.4 * 3_600),
-            UsageLimit(id: "codex.primary", title: "7d", usedPercent: 41, resetsAt: now + 3.2 * 86_400),
+            UsageLimit(id: "codex.secondary", title: "5h", usedPercent: 24, resetsAt: now + 2.4 * 3_600, windowDuration: 5 * 3_600),
+            UsageLimit(id: "codex.primary", title: "7d", usedPercent: 41, resetsAt: now + 3.2 * 86_400, windowDuration: 7 * 86_400),
         ],
         credits: CreditSnapshot(balance: 0, unlimited: false),
         resetCredits: ResetCreditSnapshot(
@@ -131,9 +131,9 @@ private enum PreviewData {
     static let claude = UsageSnapshot(
         provider: .claude,
         limits: [
-            UsageLimit(id: "Session", title: "Session", usedPercent: 32, resetsAt: now + 3.1 * 3_600),
-            UsageLimit(id: "Weekly", title: "Weekly", usedPercent: 47, resetsAt: now + 2.1 * 86_400),
-            UsageLimit(id: "Weekly Fable", title: "Weekly Fable", usedPercent: 18, resetsAt: now + 2.1 * 86_400, scope: "Fable"),
+            UsageLimit(id: "Session", title: "Session", usedPercent: 32, resetsAt: now + 3.1 * 3_600, windowDuration: 5 * 3_600),
+            UsageLimit(id: "Weekly", title: "Weekly", usedPercent: 47, resetsAt: now + 2.1 * 86_400, windowDuration: 7 * 86_400),
+            UsageLimit(id: "Weekly Fable", title: "Weekly Fable", usedPercent: 18, resetsAt: now + 2.1 * 86_400, scope: "Fable", windowDuration: 7 * 86_400),
         ],
         credits: CreditSnapshot(balance: 25, unlimited: false, currencyCode: "USD"),
         plan: "max",

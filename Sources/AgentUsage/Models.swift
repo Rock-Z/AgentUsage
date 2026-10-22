@@ -203,9 +203,18 @@ struct UsageLimit: Equatable, Sendable, Identifiable {
     var resetsAt: Date?
     /// The model or surface this limit applies to; `nil` for account-wide limits.
     var scope: String? = nil
+    /// The length of the limit's window, when known.
+    var windowDuration: TimeInterval? = nil
 
     var remainingPercent: Double {
         max(0, 100 - self.usedPercent)
+    }
+
+    /// The share of the window still to run, 0 to 1. Remaining usage above it
+    /// is under pace; below it, over pace.
+    func windowRemainingFraction(at now: Date) -> Double? {
+        guard let windowDuration, windowDuration > 0, let resetsAt else { return nil }
+        return max(0, min(1, resetsAt.timeIntervalSince(now) / windowDuration))
     }
 
     static func durationLabel(minutes: Int) -> String {
