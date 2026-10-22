@@ -8,7 +8,9 @@ import SwiftUI
 /// comes from the appearance, the way Apple's system colors have a light and a
 /// dark variant. Colors are built in OKLCH, a perceptual space, so every hue
 /// reads equally strong at the same lightness. The tone slider shifts
-/// lightness darker or lighter within limits that keep bars readable.
+/// lightness darker or lighter within limits that keep 3:1 contrast with the
+/// popover, so light mode has no pastels: yellow deepens to gold, as macOS's
+/// own colors do.
 enum AccentChoice: Equatable, Sendable {
     case system
     /// All components are 0...1 except `tone`, which is -1 (darker) ... 1 (lighter).
@@ -48,19 +50,54 @@ enum AccentChoice: Equatable, Sendable {
     ]
 
     func color(dark: Bool) -> Color {
+        Color(nsColor: nsColor(dark: dark))
+    }
+
+    /// The accent for an appearance. The macOS accent keeps its hue and
+    /// colorfulness but is brought into the same readable lightness range.
+    func nsColor(dark: Bool) -> NSColor {
+        let (lightness, chroma, hue) = oklch(dark: dark)
+        let rgb = Self.srgb(lightness: lightness, chroma: chroma, hue: hue)
+        return NSColor(srgbRed: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1)
+    }
+
+    /// Ink for marks drawn on the accent: its own hue, pale in light mode and
+    /// deep in dark mode, like Material's on-primary colors. One polarity per
+    /// appearance, so the ink never flips as the accent changes.
+    func inkColor(dark: Bool) -> NSColor {
+        let hue = oklch(dark: dark).hue
+        let rgb = Self.srgb(lightness: dark ? 0.26 : 0.97, relativeChroma: 0.35, hue: hue)
+        return NSColor(srgbRed: rgb.r, green: rgb.g, blue: rgb.b, alpha: 1)
+    }
+
+    private func oklch(dark: Bool) -> (lightness: Double, chroma: Double, hue: Double) {
         switch self {
-        case .system: Color(nsColor: .controlAccentColor)
         case let .custom(hue, chroma, tone):
-            Color(nsColor: Self.nsColor(hue: hue, chroma: chroma, tone: tone, dark: dark))
+            let lightness = Self.lightness(tone: tone, dark: dark)
+            return (lightness, chroma * Self.maximumChroma(lightness: lightness, hue: hue), hue)
+        case .system:
+            // The system accent varies by appearance; resolve it for this one.
+            var resolved = NSColor.controlAccentColor
+            NSAppearance(named: dark ? .darkAqua : .aqua)?.performAsCurrentDrawingAppearance {
+                resolved = NSColor.controlAccentColor.usingColorSpace(.sRGB) ?? resolved
+            }
+            let system = Self.oklch(resolved)
+            let range = Self.lightnessRange(dark: dark)
+            let lightness = min(max(system.lightness, range.lowerBound), range.upperBound)
+            return (lightness, min(system.chroma, Self.maximumChroma(lightness: lightness, hue: system.hue)), system.hue)
         }
     }
 
-    /// OKLCH lightness for the appearance: centered where accents read well on
-    /// a light or dark popover, shifted by tone within readable bounds.
+    /// OKLCH lightness for the appearance, shifted by tone within the range
+    /// that keeps 3:1 contrast with a light or dark popover.
     static func lightness(tone: Double, dark: Bool) -> Double {
-        dark
-            ? min(max(0.74 + tone * 0.14, 0.52), 0.9)
-            : min(max(0.6 + tone * 0.2, 0.34), 0.77)
+        let range = lightnessRange(dark: dark)
+        let middle = (range.lowerBound + range.upperBound) / 2
+        return middle + min(max(tone, -1), 1) * (range.upperBound - range.lowerBound) / 2
+    }
+
+    static func lightnessRange(dark: Bool) -> ClosedRange<Double> {
+        dark ? 0.64...0.88 : 0.38...0.58
     }
 
     static func nsColor(hue: Double, chroma: Double, tone: Double, dark: Bool) -> NSColor {
@@ -111,6 +148,24 @@ enum AccentChoice: Equatable, Sendable {
         let tolerance = 1e-4
         let inGamut = [rgb.r, rgb.g, rgb.b].allSatisfy { $0 >= -tolerance && $0 <= 1 + tolerance }
         return inGamut ? rgb : nil
+    }
+
+    /// OKLCH of a color, with hue as a fraction of a turn.
+    static func oklch(_ color: NSColor) -> (lightness: Double, chroma: Double, hue: Double) {
+        guard let srgb = color.usingColorSpace(.sRGB) else { return (0.5, 0, 0) }
+        func linear(_ channel: CGFloat) -> Double {
+            let value = Double(channel)
+            return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        }
+        let (r, g, b) = (linear(srgb.redComponent), linear(srgb.greenComponent), linear(srgb.blueComponent))
+        let l = cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+        let m = cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+        let s = cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+        let lightness = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s
+        let a = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s
+        let bb = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+        let hue = atan2(bb, a) / (2 * .pi)
+        return (lightness, hypot(a, bb), hue < 0 ? hue + 1 : hue)
     }
 
     private static func encode(_ rgb: RGB) -> RGB {

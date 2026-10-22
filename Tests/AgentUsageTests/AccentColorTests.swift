@@ -12,20 +12,31 @@ struct AccentColorTests {
         #expect(AccentChoice(stored: "1.4,-2,3") == .custom(hue: 1, chroma: 0, tone: 1), "values are clamped")
     }
 
-    /// Accents must read against the popover: darker than a light background
-    /// and lighter than a dark one, for every hue, colorfulness, and tone.
+    /// Every accent reaches 3:1, the WCAG minimum for graphics, against the
+    /// popover: a light one in light mode and a dark one in dark mode.
     @Test(arguments: [false, true])
-    func everyChoiceStaysReadable(dark: Bool) {
-        for hue in stride(from: 0.0, through: 1, by: 1.0 / 24) {
-            for chroma in stride(from: 0.0, through: 1, by: 0.25) {
-                for tone in stride(from: -1.0, through: 1, by: 0.5) {
-                    let luminance = relativeLuminance(AccentChoice.nsColor(hue: hue, chroma: chroma, tone: tone, dark: dark))
-                    if dark {
-                        #expect(luminance >= 0.17, "hue \(hue) chroma \(chroma) tone \(tone)")
-                    } else {
-                        #expect(luminance <= 0.52, "hue \(hue) chroma \(chroma) tone \(tone)")
-                    }
-                }
+    func everyAccentContrastsWithThePopover(dark: Bool) {
+        let popover = dark ? 0.025 : 0.75
+        for choice in Self.choices + [.system] {
+            let contrast = Self.contrast(relativeLuminance(choice.nsColor(dark: dark)), popover)
+            #expect(contrast >= 3, "\(choice.stored) at \(contrast)")
+        }
+    }
+
+    /// Marks drawn on the accent, like the pace marker, contrast with it and
+    /// keep its hue, with one polarity per appearance as in Material's on-colors.
+    @Test(arguments: [false, true])
+    func inkContrastsWithTheAccentInItsHue(dark: Bool) {
+        for choice in Self.choices + [.system] {
+            let accent = choice.nsColor(dark: dark)
+            let ink = choice.inkColor(dark: dark)
+            #expect(Self.contrast(relativeLuminance(accent), relativeLuminance(ink)) >= 3, "\(choice.stored)")
+            #expect((relativeLuminance(ink) > relativeLuminance(accent)) == !dark, "light ink in light mode")
+            let accentLCH = AccentChoice.oklch(accent)
+            let inkLCH = AccentChoice.oklch(ink)
+            if accentLCH.chroma > 0.05 {
+                let difference = abs(accentLCH.hue - inkLCH.hue)
+                #expect(min(difference, 1 - difference) < 0.03, "\(choice.stored) ink keeps the hue")
             }
         }
     }
@@ -40,10 +51,25 @@ struct AccentColorTests {
 
     @Test func toneReachesDarkAndLightColors() {
         let navy = relativeLuminance(AccentChoice.nsColor(hue: 0.73, chroma: 0.6, tone: -1, dark: false))
-        let yellow = AccentChoice.nsColor(hue: 0.27, chroma: 1, tone: 1, dark: false).usingColorSpace(.sRGB)!
         #expect(navy < 0.08, "a dark navy is reachable")
+        let yellow = AccentChoice.nsColor(hue: 0.27, chroma: 1, tone: 1, dark: true).usingColorSpace(.sRGB)!
         #expect(yellow.redComponent > 0.75 && yellow.greenComponent > 0.65 && yellow.blueComponent < 0.2,
-                "a clear yellow is reachable, even in light mode")
+                "a clear yellow is reachable in dark mode")
+        let gold = AccentChoice.nsColor(hue: 0.27, chroma: 1, tone: 1, dark: false).usingColorSpace(.sRGB)!
+        #expect(gold.redComponent > gold.greenComponent && gold.greenComponent > gold.blueComponent,
+                "and deepens to gold in light mode")
+    }
+
+    private static let choices: [AccentChoice] = stride(from: 0.0, through: 1, by: 1.0 / 24).flatMap { hue in
+        stride(from: 0.0, through: 1, by: 0.25).flatMap { chroma in
+            stride(from: -1.0, through: 1, by: 0.5).map { tone in
+                AccentChoice.custom(hue: hue, chroma: chroma, tone: tone)
+            }
+        }
+    }
+
+    private static func contrast(_ a: Double, _ b: Double) -> Double {
+        (max(a, b) + 0.05) / (min(a, b) + 0.05)
     }
 
     @Test func presetsAreDistinct() {
