@@ -2645,6 +2645,9 @@ struct UsageBar: View {
                         Capsule()
                             .fill(theme.usageFill)
                             .frame(width: geometry.size.width * progress)
+                    }
+                    // An overlay, so the taller marker cannot thicken the bar.
+                    .overlay(alignment: .leading) {
                         if let pace {
                             PaceMarker(onFill: pace < progress)
                                 .offset(x: geometry.size.width * pace - PaceMarker.width / 2)
