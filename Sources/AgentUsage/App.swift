@@ -2635,12 +2635,13 @@ private struct PaceMarker: View {
     var body: some View {
         Capsule()
             .fill(theme.paceMarker(onFill: onFill))
-            .frame(width: Self.width, height: 10)
+            .frame(width: Self.width, height: UsageBar.height)
             .help("Pace: where usage would be if spread evenly over this window")
     }
 }
 
 struct UsageBar: View {
+    static let height: CGFloat = 6
     var label: String
     var limit: UsageLimit?
     @Environment(\.usageVisualTheme) private var theme
@@ -2674,15 +2675,17 @@ struct UsageBar: View {
                             .fill(theme.usageFill)
                             .frame(width: geometry.size.width * progress)
                     }
-                    // An overlay, so the taller marker cannot thicken the bar.
+                    // An overlay, so the marker cannot resize the bar.
                     .overlay(alignment: .leading) {
                         if let pace {
+                            // Centered on the pace, but kept inside the bar's ends.
+                            let x = geometry.size.width * pace - PaceMarker.width / 2
                             PaceMarker(onFill: pace < progress)
-                                .offset(x: geometry.size.width * pace - PaceMarker.width / 2)
+                                .offset(x: min(max(x, 0), geometry.size.width - PaceMarker.width))
                         }
                     }
                 }
-                .frame(height: 6)
+                .frame(height: Self.height)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("\(label) remaining")
                 .accessibilityValue(accessibilityValue(pace: pace))
