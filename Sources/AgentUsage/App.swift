@@ -1191,7 +1191,7 @@ struct ProviderCard: View {
             VStack(alignment: .leading, spacing: LayoutSpacing.related) {
                 // Wider than a label's gap to its own bar, so each bar reads
                 // with its label rather than the next one.
-                VStack(alignment: .leading, spacing: LayoutSpacing.section) {
+                VStack(alignment: .leading, spacing: LayoutSpacing.inset) {
                     ForEach(state.snapshot?.limits ?? []) { limit in
                         UsageBar(label: limit.title, limit: limit)
                     }
