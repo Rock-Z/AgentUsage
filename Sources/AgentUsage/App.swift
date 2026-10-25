@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Network
 import SwiftUI
 
 @main
@@ -139,6 +140,9 @@ final class UsageStore: ObservableObject {
 
     private var refreshTask: Task<Void, Never>?
     private var timerTask: Task<Void, Never>?
+    private let pathMonitor = NWPathMonitor()
+    /// From the network monitor's updates; assumed online until it reports.
+    private var isOnline = true
     private let fetchers: [Provider: any UsageFetching] = [
         .codex: CodexUsageFetcher(),
         .claude: ClaudeUsageFetcher(),
@@ -170,7 +174,24 @@ final class UsageStore: ObservableObject {
             defaults: defaults,
             availableProviders: FirstLaunchSettings.locallyAvailableProviders(),
             hasLaunchedBefore: defaults.bool(forKey: "SUHasLaunchedBefore"))
+        monitorNetwork()
         start()
+    }
+
+    /// Refreshes as soon as the network comes back, so offline messages clear
+    /// without waiting for the next timed refresh.
+    private func monitorNetwork() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let online = path.status == .satisfied
+            Task { @MainActor in self?.networkChanged(online: online) }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "io.github.rock-z.agentusage.network"))
+    }
+
+    private func networkChanged(online: Bool) {
+        let wasOnline = isOnline
+        isOnline = online
+        if online, !wasOnline { refreshAll() }
     }
 
     /// Fixed states with no fetching, for rendering previews.
@@ -269,6 +290,14 @@ final class UsageStore: ObservableObject {
 
     private func refresh(providers: [Provider]) async {
         let providers = providers.filter { isTracking($0) }
+        // Offline, fetching can only fail, slowly and with a cryptic error.
+        // Data from the last refresh stays shown.
+        if !isOnline {
+            for provider in providers {
+                states[provider, default: ProviderState()].error = ProviderState.offlineMessage
+            }
+            return
+        }
         for provider in providers {
             states[provider, default: ProviderState()].isRefreshing = true
             states[provider, default: ProviderState()].error = nil
@@ -298,8 +327,7 @@ final class UsageStore: ObservableObject {
                     state.snapshot = snapshot
                     state.error = nil
                 case let .failure(error):
-                    state.error = (error as? LocalizedError)?.errorDescription
-                        ?? error.localizedDescription
+                    state.error = ProviderState.message(for: error, offline: !isOnline)
                 }
                 states[provider] = state
             }

@@ -106,3 +106,20 @@ struct ClaudeOAuthRefreshTests {
         #expect((try? String(contentsOf: marker, encoding: .utf8)) == "refreshed")
     }
 }
+
+struct RefreshErrorMessageTests {
+    private struct Cryptic: LocalizedError {
+        var errorDescription: String? { "failed to fetch codex rate limits: error sending request for url" }
+    }
+
+    @Test func offlineFailuresReadPlainly() {
+        #expect(ProviderState.message(for: Cryptic(), offline: true) == "No internet connection.")
+        #expect(ProviderState.message(for: URLError(.notConnectedToInternet), offline: false) == "No internet connection.",
+                "the system's own offline errors count even before the network monitor reports")
+    }
+
+    @Test func otherFailuresKeepTheirDetail() {
+        #expect(ProviderState.message(for: Cryptic(), offline: false)
+            == "failed to fetch codex rate limits: error sending request for url")
+    }
+}

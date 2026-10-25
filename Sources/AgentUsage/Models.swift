@@ -362,6 +362,20 @@ struct ProviderState: Equatable {
     var snapshot: UsageSnapshot?
     var isRefreshing = false
     var error: String?
+
+    static let offlineMessage = "No internet connection."
+
+    /// What a failed refresh shows. Offline failures read plainly instead of
+    /// surfacing the underlying error, often a URL or a helper's output.
+    static func message(for error: Error, offline: Bool) -> String {
+        let offlineCodes: [URLError.Code] = [
+            .notConnectedToInternet, .networkConnectionLost, .dataNotAllowed, .internationalRoamingOff,
+        ]
+        if offline || (error as? URLError).map({ offlineCodes.contains($0.code) }) == true {
+            return offlineMessage
+        }
+        return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
 }
 
 /// What the menu bar shows for one provider under the selected metrics.
